@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
 
-const homeRoot = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-home-'));
+const homeRoot = await mkdtemp(join(tmpdir(), 'dsh-pi-subagent-home-'));
 const previousHome = process.env.HOME;
 process.env.HOME = homeRoot;
 
@@ -309,7 +309,7 @@ function structuredRecords({ text = '改完了：lib/index.js' } = {}) {
 }
 
 before(async () => {
-  root = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-test-'));
+  root = await mkdtemp(join(tmpdir(), 'dsh-pi-subagent-test-'));
   FAKE_PI = join(root, 'fake-pi-dev.mjs');
   FAKE_PI_OLD = join(root, 'fake-pi-dev-old.mjs');
   const fixture = await readFile(new URL('./fake-pi-dev.mjs', import.meta.url), 'utf8');

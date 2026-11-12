@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows a
 simple version-per-release list; this project is pre-1.0 and versioned by
 capability, not by compatibility guarantees.
 
+## 0.2.1
+
+- Renamed the package and repository to `dsh-pi-subagent` (the previous
+  `dsh-subagent-pi` name on npm belongs to an unrelated project). Behavior is
+  unchanged; install the Git or local path instead of an npm name until a
+  release under the new name exists.
+
 ## 0.2.0
 
 Session-backed delegations.

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Pi subagent (dsh-subagent-pi)",
+    "title": "Pi subagent (dsh-pi-subagent)",
     "description": "Pi (pi-dev) as a DSH subagent with an inspectable child session: one pi-dev process per delegation, projected into a durable read-only Session."
   }
 }

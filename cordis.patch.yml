@@ -1,1 +1,1 @@
-- insert: [{ id: subagent-pi, name: dsh-subagent-pi, config: {} }]
+- insert: [{ id: subagent-pi, name: dsh-pi-subagent, config: {} }]

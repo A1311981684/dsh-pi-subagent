@@ -23,7 +23,7 @@ let sessionsDir = '';
 let sequence = 0;
 
 before(async () => {
-  root = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-wrapper-'));
+  root = await mkdtemp(join(tmpdir(), 'dsh-pi-subagent-wrapper-'));
   fakePi = join(root, 'fake-pi');
   // Record exactly what the wrapper passes to Pi, then print a fake answer.
   await writeFile(

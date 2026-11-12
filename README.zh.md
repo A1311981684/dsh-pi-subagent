@@ -1,4 +1,4 @@
-# dsh-subagent-pi
+# dsh-pi-subagent
 
 [English](README.md) | 中文
 
@@ -160,7 +160,7 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 插件的默认 `command` 仍然是 `$HOME/.dsh/bin/pi-dev`。想用自带封装，就把它复制到这个位置
 （或者建软链——封装会先把自己的软链解析成真实路径，包里的 `rules/PI-DEV-RULES.md` 照样
 找得到），或者把
-`command` 指到包里的 `bin/pi-dev`（例如 `<...>/node_modules/dsh-subagent-pi/bin/pi-dev`）。
+`command` 指到包里的 `bin/pi-dev`（例如 `<...>/node_modules/dsh-pi-subagent/bin/pi-dev`）。
 你自己已经有 `pi-dev` 的话，把 `command` 指向它就行，插件只认上面那份契约。
 
 ## 安装
@@ -171,10 +171,10 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 
 ```bash
 # 从 GitHub 装
-dsh plugin --profile web add git+https://github.com/A1311981684/dsh-subagent-pi.git
+dsh plugin --profile web add git+https://github.com/A1311981684/dsh-pi-subagent.git
 
 # 从本地目录装
-dsh plugin --profile web add file:/path/to/dsh-subagent-pi
+dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 ```
 
 也可以把它写进 profile 的 `~/.dsh/profiles/<名字>/package.json`，让 profile 从自己的
@@ -183,11 +183,11 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
 ```json
 {
   "dependencies": {
-    "dsh-subagent-pi": "git+https://github.com/A1311981684/dsh-subagent-pi.git"
+    "dsh-pi-subagent": "git+https://github.com/A1311981684/dsh-pi-subagent.git"
   },
   "dsh": {
     "profile": {
-      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-subagent-pi"]
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-pi-subagent"]
     }
   }
 }
@@ -202,7 +202,7 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
 ```yaml
 - insert:
     - id: subagent-pi
-      name: dsh-subagent-pi
+      name: dsh-pi-subagent
       config:
         # command: /usr/local/bin/pi-dev
         # model: deepseek-flash
@@ -357,7 +357,7 @@ node scripts/cleanup.mjs [--days 14] [--dry-run] [--sessions]
 ## 开发与自测
 
 ```bash
-git clone <repo> && cd dsh-subagent-pi
+git clone <repo> && cd dsh-pi-subagent
 node --check lib/index.js
 bash -n bin/pi-dev
 node --test test/            # 42 个单元测试，全绿，不联网、不花模型调用

@@ -21,7 +21,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 let root = '';
 
 before(async () => {
-  root = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-cleanup-'));
+  root = await mkdtemp(join(tmpdir(), 'dsh-pi-subagent-cleanup-'));
 });
 
 after(async () => {

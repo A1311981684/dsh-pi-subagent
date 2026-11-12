@@ -1,4 +1,4 @@
-# dsh-subagent-pi
+# dsh-pi-subagent
 
 English | [中文](README.zh.md)
 
@@ -180,7 +180,7 @@ author's workflow:
 The plugin's default `command` is still `$HOME/.dsh/bin/pi-dev`. To use the bundled
 wrapper, either copy it there or symlink it (the wrapper resolves its own real path, so
 the bundled `rules/PI-DEV-RULES.md` is still found) or point `command` at the bundled path, for example
-`<...>/node_modules/dsh-subagent-pi/bin/pi-dev`. If you already have your own `pi-dev`,
+`<...>/node_modules/dsh-pi-subagent/bin/pi-dev`. If you already have your own `pi-dev`,
 point `command` at that instead; the contract above is all the plugin needs.
 
 ## Install
@@ -192,10 +192,10 @@ up as a card under **Plugins → Installed** in the web app.
 
 ```bash
 # from GitHub
-dsh plugin --profile web add git+https://github.com/A1311981684/dsh-subagent-pi.git
+dsh plugin --profile web add git+https://github.com/A1311981684/dsh-pi-subagent.git
 
 # from a local checkout
-dsh plugin --profile web add file:/path/to/dsh-subagent-pi
+dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 ```
 
 Or add it to the profile manifest `~/.dsh/profiles/<name>/package.json` and let the profile
@@ -204,11 +204,11 @@ resolve it from its own `node_modules`:
 ```json
 {
   "dependencies": {
-    "dsh-subagent-pi": "git+https://github.com/A1311981684/dsh-subagent-pi.git"
+    "dsh-pi-subagent": "git+https://github.com/A1311981684/dsh-pi-subagent.git"
   },
   "dsh": {
     "profile": {
-      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-subagent-pi"]
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-pi-subagent"]
     }
   }
 }
@@ -224,7 +224,7 @@ to the profile's own `cordis.patch.yml`. One row is enough; the plugin registers
 ```yaml
 - insert:
     - id: subagent-pi
-      name: dsh-subagent-pi
+      name: dsh-pi-subagent
       config:
         # command: /usr/local/bin/pi-dev
         # model: deepseek-flash
@@ -411,7 +411,7 @@ and the sqlite index may keep stale rows. The candidates include parent and chil
 ## Development and testing
 
 ```bash
-git clone <repo> && cd dsh-subagent-pi
+git clone <repo> && cd dsh-pi-subagent
 node --check lib/index.js
 bash -n bin/pi-dev
 node --test test/            # 42 unit tests, all green, no network and no model call

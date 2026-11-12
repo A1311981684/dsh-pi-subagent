@@ -38,7 +38,7 @@ async function main() {
   }
 
   const cwd = process.cwd();
-  const logDir = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-real-'));
+  const logDir = await mkdtemp(join(tmpdir(), 'dsh-pi-subagent-real-'));
   /** @type {any} */
   let definition;
   const warnings = [];
