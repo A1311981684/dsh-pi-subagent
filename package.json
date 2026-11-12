@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-pi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi (pi-dev) as a DSH subagent: one pi-dev child process per delegation, projected into an inspectable, durable DSH child session",
   "author": "Asta Zhao",
   "license": "MIT",
@@ -34,7 +34,8 @@
     "LICENSE",
     "README.md",
     "README.zh.md",
-    "scripts"
+    "scripts",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "deepseek-harness",
