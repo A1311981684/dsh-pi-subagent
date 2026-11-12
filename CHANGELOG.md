@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows a
 simple version-per-release list; this project is pre-1.0 and versioned by
 capability, not by compatibility guarantees.
 
+## 0.2.2
+
+- Add an opt-in `pi_recover_legacy` maintenance tool (`recoverLegacy: true`).
+  It scans the parent session for legacy `external` delegations, recovers each
+  final answer from the stored run log, creates a real read-only child session,
+  and appends a `（回填 …）` catalog row. `ids` repairs specifically listed
+  incomplete sessions; the tool is idempotent and supports `dryRun`.
+
 ## 0.2.1
 
 - Renamed the package and repository to `dsh-pi-subagent` (the previous

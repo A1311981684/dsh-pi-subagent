@@ -12,3 +12,4 @@
 import './tool.test.js';
 import './cleanup.test.js';
 import './pi-dev.test.js';
+import './recover.test.js';

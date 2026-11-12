@@ -227,6 +227,7 @@ dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 | `tools` | — | 填了就传 `--tools`。 |
 | `approve` | `false` | 为 `true` 就传 `--approve`。 |
 | `projection` | `true` | 把每次派活投影成 DSH 子会话。`false` 完全不投影，也不给封装传 `--mode`。 |
+| `recoverLegacy` | `false` | 注册维护工具 `pi_recover_legacy`，把旧的 `mode: "external"` 派活回填成真实子会话。默认关，见 [旧派活回填（维护工具）](#旧派活回填维护工具)。 |
 | `logMode` | `summary` | `summary`（默认）插件自己写精简日志：任务首行、最终回答、每个工具一行、usage/stopReason/子会话 id。`full` 让封装 tee 完整输出（`--log`），JSON 模式下就是原始事件流，可能几十 MB。 |
 | `logDir` | `$HOME/.dsh/pi-logs` | 日志放这里，文件名是 `<YYYYMMDD-HHmmss>-<id 前 8 位>.log`。 |
 | `sessionDir` | `$HOME/.dsh/pi-sessions` | 续跑时要复用的 Pi 会话放这里，作为 `--session-dir` 传给封装。 |
@@ -236,7 +237,7 @@ dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 配置在挂载时就检查，配错当场报错，不会拖到第一次派活。规则：`graceMs` 和
 `maxOutputBytes` 必须是正有限数，`command`、`logDir`、`sessionDir` 必须是非空字符串，
 `logMode` 只能是 `"summary"` 或 `"full"`，`args` 必须是字符串数组，
-`approve`/`projection` 必须是布尔。
+`approve`/`projection`/`recoverLegacy` 必须是布尔。
 
 ## 会话投影
 
@@ -315,7 +316,8 @@ Pi 自己的会话文件会堆在 `sessionDir` 下；它们不是 DSH 日志，�
 
 ## 行为细节
 
-- **只有一个 `pi` 工具**：挂载时注册。工具描述告诉模型它在把任务派给本机 Pi，期间会产生一个
+- **默认只有一个 `pi` 工具**：挂载时注册（配置 `recoverLegacy: true` 时会额外注册维护工具
+  `pi_recover_legacy`，见下文）。工具描述告诉模型它在把任务派给本机 Pi，期间会产生一个
   可查看的子会话。参数是 `prompt`（必填）、`cwd`（可选，默认用调用方会话的工作目录）、
   `label`（可选，默认取 `prompt` 第一行，最多 60 字）、`session`（可选，之前某次调用返回的
   子会话 id，用来接着干）。
@@ -354,13 +356,36 @@ node scripts/cleanup.mjs [--days 14] [--dry-run] [--sessions]
 `session.v4.jsonl.zstd` 的会话目录，并提示：删会话属于带外操作，最好先停 DSH，sqlite 索引
 可能留下陈旧记录。候选里父会话和子会话都有（origin 在压缩日志里，脚本不做区分）。
 
+## 旧派活回填（维护工具）
+
+投影功能上线前，一次派活在父会话里只有一条 `mode: "external"` 的 `subagent/catalog` 记录，
+背后没有子会话，DSH 的子智能体面板点不开。可选的 `pi_recover_legacy` 维护工具会为每条旧派活
+补一个**新的、可点开的只读子会话**：
+
+- **候选**：所有 `mode: "external"` 的目录行，加上 `ids` 里点名的 childId（例如投影只剩用户
+  消息的那条 one-shot 会话）。
+- **内容**：按 childId 前 8 位在 `logDir` 里找旧日志。纯文本日志整段使用；JSON 事件流取最后
+  一条非空助手文本，并附上工具摘要。找不到日志也照样建会话，内容写“原日志缺失”的说明。
+  内容上限 1 MB，超了保留尾部并注明截断。
+- **幂等**：已经有回填目录行（`（回填 <旧 id 前 8 位>）…`）的旧行直接跳过，所以可以重复运行；
+  `dryRun: true` 只报告不落盘。
+
+该工具只在 `recoverLegacy: true` 时注册，正常安装里看不到。要在某台机器上跑一次，把开关加进
+profile patch（`~/.dsh/profiles/web/cordis.patch.yml`），重载 DSH，调用工具，再把开关删掉重载：
+
+```yaml
+- insert: [{ id: subagent-pi, name: dsh-pi-subagent, config: { recoverLegacy: true } }]
+```
+
+旧目录行删不掉，会原样留在新行旁边。
+
 ## 开发与自测
 
 ```bash
 git clone <repo> && cd dsh-pi-subagent
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 42 个单元测试，全绿，不联网、不花模型调用
+node --test test/            # 50 个单元测试，全绿，不联网、不花模型调用
 node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型调用
 ```
 
@@ -377,6 +402,10 @@ node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型
   未知和并发 `session`、卸载时释放句柄。
 - `test/cleanup.test.js` 用临时 `$HOME` 跑 `scripts/cleanup.mjs`：`--dry-run` 不删、`--days`
   筛选、删除时保留新文件、`--sessions` 只列不删。
+- `test/recover.test.js` 用 `recoverLegacy: true` 挂插件，假父会话的 `snapshotEvents()` 返回旧
+  目录行，检查：默认不注册；每条候选都建只读子会话且 v4 事件顺序、父目录 payload 严格匹配；
+  纯文本日志与 JSONL 日志（最后一条助手文本 + 工具附录）；日志缺失说明；重复运行跳过；
+  `dryRun` 不写任何东西；单条失败不影响其余。
 - `test/pi-dev.test.js` 用假 `PI_BIN` 跑自带封装，检查 Pi 的 argv：`--session-id`/`--session-dir`
   取代 `--no-session`、默认会话目录、以及不带 id 时原来的 `--no-session` 行为。
 - `test/real-pi.mjs` 是手动端到端：用真 `pi-dev` 跑一条「只回一行字」的短任务，

@@ -249,6 +249,7 @@ All fields are optional; the bundle patch passes none of them.
 | `tools` | — | When set, passed as `--tools`. |
 | `approve` | `false` | When `true`, passes `--approve`. |
 | `projection` | `true` | Project each run into a DSH child session. `false` skips the projection entirely and passes no `--mode` to the wrapper. |
+| `recoverLegacy` | `false` | Register the maintenance tool `pi_recover_legacy`, which backfills legacy `mode: "external"` delegations into real child sessions. Off by default; see [Legacy delegation backfill](#legacy-delegation-backfill-maintenance). |
 | `logMode` | `summary` | `summary` (default) writes a compact log itself: task first line, final answer, one line per tool, usage/stop reason/session. `full` asks the wrapper to tee the whole output (`--log`), which in JSON mode is the raw event stream and can be tens of MB. |
 | `logDir` | `$HOME/.dsh/pi-logs` | Where logs go, named `<YYYYMMDD-HHmmss>-<id 8 chars>.log`. |
 | `sessionDir` | `$HOME/.dsh/pi-sessions` | Where Pi stores the sessions a continuation reuses; passed as `--session-dir`. |
@@ -258,8 +259,8 @@ All fields are optional; the bundle patch passes none of them.
 Validation happens at mount time, so a bad value is a load error rather than a surprise on
 the first delegation: `graceMs` and `maxOutputBytes` must be positive finite numbers,
 `command`, `logDir`, and `sessionDir` must be non-empty strings, `logMode` must be
-`"summary"` or `"full"`, `args` must be an array of strings, and `approve`/`projection`
-must be booleans.
+`"summary"` or `"full"`, `args` must be an array of strings, and `approve`/`projection`/
+`recoverLegacy` must be booleans.
 
 ## Session projection
 
@@ -408,13 +409,41 @@ the caveats that deleting sessions is an out-of-band operation, DSH should be st
 and the sqlite index may keep stale rows. The candidates include parent and child sessions
 (the origin is inside the compressed log, so the script does not try to tell them apart).
 
+## Legacy delegation backfill (maintenance)
+
+Before session projection existed, a delegation was only a `mode: "external"` row in the
+parent's `subagent/catalog`: there is no child session behind it, so DSH's subagent panel
+cannot open it. The optional `pi_recover_legacy` tool backfills those rows with one new
+read-only child session each:
+
+- **Candidates** — every `mode: "external"` catalog row, plus any child id passed in `ids`
+  (for example a one-shot session whose projection kept only the user message).
+- **Content** — the old log found by child-id prefix in `logDir`. A plain-text log is used
+  as-is; a JSON event stream contributes its last non-empty assistant text, plus a tool
+  summary appendix. A missing log still creates the session, with a "log missing" notice.
+  The content is capped at 1 MB, keeping its tail and saying it was truncated.
+- **Idempotent** — a legacy row that already has a backfill catalog row
+  (`（回填 <old id first 8>）…`) is skipped, so the tool can be run again. `dryRun: true` only
+  reports what would be recovered.
+
+The tool is registered only when `recoverLegacy: true`, so a normal install never exposes
+it. To run it once on one machine, add the flag to the profile patch
+(`~/.dsh/profiles/web/cordis.patch.yml`), reload DSH, call the tool, then remove the flag
+and reload again:
+
+```yaml
+- insert: [{ id: subagent-pi, name: dsh-pi-subagent, config: { recoverLegacy: true } }]
+```
+
+Old catalog rows cannot be deleted, so they stay as-is next to the backfilled ones.
+
 ## Development and testing
 
 ```bash
 git clone <repo> && cd dsh-pi-subagent
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 42 unit tests, all green, no network and no model call
+node --test test/            # 50 unit tests, all green, no network and no model call
 node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
 ```
 
@@ -436,6 +465,12 @@ node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
   and concurrent `session` ids, and the unload effect.
 - `test/cleanup.test.js` runs `scripts/cleanup.mjs` against a temporary `$HOME`: `--dry-run`
   never deletes, `--days` filters, deletion keeps fresh files, and `--sessions` only lists.
+- `test/recover.test.js` mounts the plugin with `recoverLegacy: true` on a fake parent whose
+  `snapshotEvents()` returns legacy catalog rows, and checks: the tool is absent by default;
+  a new read-only child session per candidate with the v4 event order and exact catalog
+  payload; text vs. JSONL log recovery (last assistant text plus tool appendix); the missing
+  log notice; idempotent skips; `dryRun` writing nothing; and one rejected row not stopping
+  the rest.
 - `test/pi-dev.test.js` executes the bundled wrapper with a fake `PI_BIN` and checks the Pi
   argv: `--session-id`/`--session-dir` replace `--no-session`, the default session directory,
   and the unchanged `--no-session` behaviour when no id is given.
