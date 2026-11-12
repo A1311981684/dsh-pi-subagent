@@ -168,6 +168,7 @@ function mount(options = {}) {
     : new FakePersistence({ log, ...(options.persistenceOptions ?? {}) });
   const warned = [];
   const registered = [];
+  const disposers = [];
   const ctx = {
     logger: { warn: (...parts) => warned.push(parts.join(' ')) },
     tools: {
@@ -176,12 +177,15 @@ function mount(options = {}) {
         return () => {};
       },
     },
+    effect(callback) {
+      disposers.push(callback());
+    },
     ...(sessions === null ? {} : { sessions }),
     ...(persistence === null ? {} : { sessionPersistence: persistence }),
   };
   apply(ctx, { command: FAKE_PI, logDir: join(root, 'logs'), ...(options.config ?? {}) });
   assert.equal(registered.length, 1, 'apply must register exactly one tool');
-  return { definition: registered[0], ctx, sessions, persistence, warned, log };
+  return { definition: registered[0], ctx, sessions, persistence, warned, log, disposers };
 }
 
 /** The parent session the fake agent drives. */
@@ -333,12 +337,14 @@ test('工具注册：名字、面向模型的描述、参数与输出声明', ()
   assert.match(definition.description, /Pi coding agent/);
   assert.match(definition.description, /child session/);
   assert.match(definition.description, /tool calls/);
-  assert.deepEqual(Object.keys(definition.parameters.properties), ['prompt', 'cwd', 'label']);
+  assert.match(definition.description, /pass the id back as `session`/);
+  assert.deepEqual(Object.keys(definition.parameters.properties), ['prompt', 'cwd', 'label', 'session']);
   assert.deepEqual(definition.parameters.required, ['prompt']);
   assert.equal(definition.parameters.properties.prompt.type, 'string');
   assert.equal(definition.parameters.properties.cwd.type, 'string');
   assert.equal(definition.parameters.properties.label.type, 'string');
-  assert.deepEqual(definition.output.schema.required, ['output', 'childSessionId', 'logPath', 'stopReason']);
+  assert.equal(definition.parameters.properties.session.type, 'string');
+  assert.deepEqual(definition.output.schema.required, ['output', 'childSessionId', 'session', 'logPath', 'stopReason']);
   assert.equal(typeof definition.output.render, 'function');
   assert.equal(typeof definition.execute, 'function');
 });
@@ -358,7 +364,7 @@ test('探测：--help 广告 --mode → 走 JSON 流，argv 带 --mode json', as
   assert.ok(record.argv.includes('--mode'));
   assert.equal(record.argv[record.argv.indexOf('--mode') + 1], 'json');
   assert.equal(record.argv[0], '--brief');
-  assert.equal(dirname(record.argv[record.argv.indexOf('--log') + 1]), join(root, 'logs'));
+  assert.equal(record.argv.includes('--log'), false, 'summary mode must not ask the wrapper to tee the JSON stream');
   assert.match(value.logPath, /\d{8}-\d{6}-[0-9a-f]{8}\.log$/);
   assert.equal(value.stopReason, 'completed');
   assert.equal(value.output, '改完了：lib/index.js');
@@ -507,15 +513,20 @@ test('完成的运行：会话先建后跑，事件序列、flush 顺序、返�
   assert.ok(position('append:parent:subagent/catalog') < position('append:child:step/start'));
   assert.ok(position('append:child:turn/end') < position(`sessions:flush:${id}`));
   assert.ok(position(`sessions:flush:${id}`) < position('sessions:flush:parent-1'));
-  assert.ok(position('sessions:flush:parent-1') < position('sessions:detach'));
-  assert.ok(position('sessions:detach') < position('persistence:close'));
-  assert.equal(mounted.sessions.detached.length, 1, 'the synthetic child must not stay live');
-  assert.deepEqual(mounted.persistence.closed, [id]);
+  // Retained for reuse: no detach and no close after the run, only a flush.
+  assert.equal(mounted.sessions.detached.length, 0, 'the projected child stays live so a later call can continue it');
+  assert.deepEqual(mounted.persistence.closed, []);
 
-  // Model-facing text: answer first, the two pointers last.
+  // Model-facing text: answer first, then the session, the continuation hint,
+  // and the log pointer.
   assert.deepEqual(mounted.definition.output.render({ prompt }, value), [{
     type: 'text',
-    text: ['改完了：lib/index.js', `subagent session: ${id}`, `full output: ${value.logPath}`].join('\n'),
+    text: [
+      '改完了：lib/index.js',
+      `subagent session: ${id}`,
+      `to continue this delegation, pass session: ${id}`,
+      `full output: ${value.logPath}`,
+    ].join('\n'),
   }]);
 });
 
@@ -959,8 +970,8 @@ test('降级：运行中 append 被拒 → 只 warn，结构仍收尾，结果�
     'step/end',
     'turn/end',
   ]);
-  assert.equal(mounted.sessions.detached.length, 1);
-  assert.deepEqual(mounted.persistence.closed, [session.id]);
+  assert.equal(mounted.sessions.detached.length, 0);
+  assert.deepEqual(mounted.persistence.closed, []);
 });
 
 test('超长行：丢弃单行并 warn，后续记录照常投影', async () => {
@@ -1031,10 +1042,12 @@ test('默认值：command 指向 $HOME/.dsh/bin/pi-dev，logDir 是 $HOME/.dsh/p
   const fixturePath = await writeFixture({ stdout: 'ok' });
   const recorded = recordPath();
   const mounted = mount({ config: { logDir: undefined } });
-  await runTool(mounted, fakeParent(), { prompt: briefWith('默认日志', fixturePath, recorded) });
+  const runValue = await runTool(mounted, fakeParent(), { prompt: briefWith('默认日志', fixturePath, recorded) });
   const record = JSON.parse(await readFile(recorded, 'utf8'));
-  const logPath = record.argv[record.argv.indexOf('--log') + 1];
-  assert.equal(dirname(logPath), join(homeRoot, '.dsh', 'pi-logs'));
+  assert.equal(dirname(runValue.logPath), join(homeRoot, '.dsh', 'pi-logs'));
+  // Default sessionDir under the same HOME, and the Pi session id always rides along.
+  assert.equal(record.argv[record.argv.indexOf('--session-dir') + 1], join(homeRoot, '.dsh', 'pi-sessions'));
+  assert.equal(record.argv.includes('--session-id'), true);
 });
 
 test('配置校验：数值项必须正有限、command 非空、projection 必须布尔', () => {
@@ -1048,6 +1061,8 @@ test('配置校验：数值项必须正有限、command 非空、projection 必�
   assert.throws(() => mount({ config: { logDir, projection: 'yes' } }), /projection must be a boolean/);
   assert.throws(() => mount({ config: { logDir, args: [1] } }), /args\[0\] must be a string/);
   assert.throws(() => mount({ config: { logDir, approve: 'yes' } }), /approve must be a boolean/);
+  assert.throws(() => mount({ config: { logDir, logMode: 'verbose' } }), /logMode must be "summary" or "full"/);
+  assert.throws(() => mount({ config: { logDir, sessionDir: '' } }), /sessionDir must be a non-empty string/);
 });
 
 test('临时目录清理：brief 目录在 run 结束后不存在', async () => {
@@ -1060,4 +1075,165 @@ test('临时目录清理：brief 目录在 run 结束后不存在', async () => 
   const record = JSON.parse(await readFile(recorded, 'utf8'));
   const briefPath = record.argv[record.argv.indexOf('--brief') + 1];
   assert.equal(existsSync(dirname(briefPath)), false, 'brief 写在独立临时目录里，run 结束后删除');
+});
+
+test('日志 summary：不传 --log，精简日志含首行、回答、工具行、usage 与 stopReason', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const mounted = mount();
+
+  const value = await runTool(mounted, fakeParent(), { prompt: briefWith('修一个 bug', fixturePath, recorded) });
+  const record = JSON.parse(await readFile(recorded, 'utf8'));
+
+  assert.equal(record.argv.includes('--log'), false, 'summary mode must not tee the JSON event stream');
+  const lines = (await readFile(value.logPath, 'utf8')).trimEnd().split('\n');
+  assert.equal(lines[0], '修一个 bug');
+  assert.equal(lines[1], '改完了：lib/index.js');
+  assert.ok(lines.includes('tool bash 12ms ok'), `missing tool line in ${JSON.stringify(lines)}`);
+  assert.ok(
+    lines.some((line) => /^usage input=30 output=7 cacheRead=3 cacheWrite=4 reasoning=1 stopReason=completed session=[0-9a-f-]{36}$/.test(line)),
+    `missing usage line in ${JSON.stringify(lines)}`,
+  );
+  assert.deepEqual(mounted.warned, []);
+});
+
+test('日志 full：argv 带 --log，logPath 就是交给封装的那个文件', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const mounted = mount({ config: { logMode: 'full' } });
+
+  const value = await runTool(mounted, fakeParent(), { prompt: briefWith('全量日志', fixturePath, recorded) });
+  const record = JSON.parse(await readFile(recorded, 'utf8'));
+
+  const index = record.argv.indexOf('--log');
+  assert.ok(index > -1);
+  assert.equal(record.argv[index + 1], value.logPath);
+  assert.equal(dirname(value.logPath), join(root, 'logs'));
+});
+
+test('复用：传 session → 同一个子会话追加 turn 2，不重复 descriptor/catalog，Pi 会话 id 不变', async () => {
+  const firstFixture = await writeFixture({ stdout: ndjson(structuredRecords({ text: '第一轮' })) });
+  const secondFixture = await writeFixture({ stdout: ndjson(structuredRecords({ text: '第二轮' })) });
+  const firstRecord = recordPath();
+  const secondRecord = recordPath();
+  const mounted = mount();
+  const parent = fakeParent(undefined, mounted.log);
+
+  const first = await runTool(mounted, parent, { prompt: briefWith('第一轮', firstFixture, firstRecord) });
+  assert.equal(typeof first.session, 'string');
+  assert.notEqual(first.session, '');
+  const second = await runTool(mounted, parent, {
+    prompt: briefWith('第二轮', secondFixture, secondRecord),
+    session: first.session,
+  });
+
+  assert.equal(second.childSessionId, first.childSessionId);
+  assert.equal(second.session, first.session);
+  assert.equal(mounted.sessions.prepared.length, 1, 'a continuation must not prepare another child session');
+  assert.equal(mounted.persistence.created.length, 1, 'a continuation must not create another log');
+
+  const session = mounted.sessions.prepared[0].session;
+  const types = session.events.map((event) => event.type);
+  assert.equal(types.filter((type) => type === 'subagent/descriptor').length, 1);
+  assert.equal(types.filter((type) => type === 'user/message').length, 2, 'each turn carries its own task text');
+  assert.deepEqual(
+    session.events.filter((event) => event.type === 'turn/start').map((event) => event.data),
+    [{ turn: 1 }, { turn: 2 }],
+  );
+  assert.deepEqual(
+    session.events.filter((event) => event.type === 'turn/end').map((event) => event.data),
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'completed' } }],
+  );
+  // Steps restart at 1 inside the new turn.
+  assert.deepEqual(
+    session.events.filter((event) => event.type === 'step/start').map((event) => event.data),
+    [
+      { turn: 1, step: 1 },
+      { turn: 1, step: 2 },
+      { turn: 2, step: 1 },
+      { turn: 2, step: 2 },
+    ],
+  );
+  assert.equal(
+    parent.events.filter((event) => event.type === 'subagent/catalog').length,
+    1,
+    'the catalog row belongs to the delegation, not to each turn',
+  );
+
+  const firstArgv = JSON.parse(await readFile(firstRecord, 'utf8')).argv;
+  const secondArgv = JSON.parse(await readFile(secondRecord, 'utf8')).argv;
+  const piSessionIdOf = (argv) => argv[argv.indexOf('--session-id') + 1];
+  assert.equal(piSessionIdOf(firstArgv), piSessionIdOf(secondArgv), 'Pi continues the same stored session');
+  assert.equal(secondArgv[secondArgv.indexOf('--session-dir') + 1], join(homeRoot, '.dsh', 'pi-sessions'));
+  assert.equal(firstArgv.includes('--no-session'), false);
+  assert.equal(secondArgv.includes('--no-session'), false);
+
+  // Both runs flushed child and parent, and neither released the child.
+  assert.equal(mounted.sessions.flushes.length, 4);
+  assert.deepEqual(mounted.persistence.closed, []);
+  assert.equal(mounted.sessions.detached.length, 0);
+
+  const secondLog = await readFile(second.logPath, 'utf8');
+  assert.match(secondLog, /^第二轮/);
+  assert.match(secondLog, new RegExp(`session=${second.childSessionId}`));
+});
+
+test('复用未知 session：抛清楚错误，不建新会话也不起进程', async () => {
+  const recorded = recordPath();
+  const mounted = mount();
+  const parent = fakeParent();
+
+  await assert.rejects(
+    () => runTool(mounted, parent, { prompt: briefWith('未知', join(root, 'no-fixture.json'), recorded), session: 'session-not-here' }),
+    /session session-not-here is not continuable in this host process; omit session to start a new one/,
+  );
+  assert.deepEqual(mounted.sessions.prepared, []);
+  assert.equal(existsSync(recorded), false);
+});
+
+test('复用并发：同一 session 正在跑时再次调用直接报错', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()), delayMs: 30_000 });
+  const recorded = recordPath();
+  const mounted = mount();
+  const parent = fakeParent();
+  const controller = new AbortController();
+
+  const running = runTool(mounted, parent, { prompt: briefWith('长任务', fixturePath, recorded) }, {
+    signal: controller.signal,
+  });
+  await waitForFile(recorded);
+  await waitFor(() => mounted.sessions.prepared.length === 1);
+  const id = mounted.sessions.prepared[0].session.id;
+
+  await assert.rejects(
+    () => runTool(mounted, parent, { prompt: '接着干', session: id }),
+    new RegExp(`session ${id} is already running`),
+  );
+  controller.abort();
+  const value = await running;
+  assert.equal(value.stopReason, 'aborted');
+});
+
+test('卸载：ctx.effect 释放保留的 handle，之后该 session 不再可续', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const mounted = mount();
+  const parent = fakeParent();
+
+  const value = await runTool(mounted, parent, { prompt: briefWith('卸载', fixturePath, recorded) });
+  const session = mounted.sessions.prepared[0].session;
+  assert.equal(mounted.disposers.length, 1, 'apply must register one unload effect');
+  assert.equal(mounted.sessions.detached.length, 0);
+
+  await mounted.disposers[0]();
+
+  assert.deepEqual(mounted.sessions.detached.map((entry) => entry.id), [session.id]);
+  assert.deepEqual(mounted.persistence.closed, [session.id]);
+  assert.ok(mounted.log.indexOf(`sessions:flush:${session.id}`) < mounted.log.indexOf('sessions:detach'));
+  assert.ok(mounted.log.indexOf('sessions:detach') < mounted.log.indexOf('persistence:close'));
+
+  await assert.rejects(
+    () => runTool(mounted, parent, { prompt: '再来', session: value.session }),
+    /is not continuable in this host process/,
+  );
 });

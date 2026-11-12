@@ -21,8 +21,9 @@
 2. 从 Pi 自己的 `auth.json` 取凭据放进环境变量，不打印；
 3. 把固定规矩拼在任务说明前面；
 4. 钉住模型（默认 `deepseek-flash`）；
-5. 加 `--no-session`，派活不留 Pi 会话；
-6. 用 `--log` 把完整输出复制一份到文件；
+5. Pi 自己的会话存储：插件传 `--session-id` 和 `--session-dir`，所以下一次派活可以接着用 Pi
+   的记忆；封装在不带 id 时仍然加 `--no-session`；
+6. 用 `--log` 把完整输出复制一份到文件（插件只在 `logMode: "full"` 时要求）；
 7. 跑完往派活记录里追加一行。
 
 插件自己只做两件事：
@@ -34,7 +35,8 @@
    `sessionPersistence.create` + `enter`/`announce`），在起进程之前追加开场事件和父会话的
    `subagent/catalog` 目录行；然后每收到一条 Pi 记录就追加对应事件：一次模型调用一对
    `step/start`…`step/end`、`assistant/message`（思考/文本/工具调用块）、每次工具执行一对
-   `tool/call` + `tool/result`，最后 `turn/end` 写真实结束原因；收尾 flush 两个会话并释放子会话。
+   `tool/call` + `tool/result`，最后 `turn/end` 写真实结束原因；收尾 flush 两个会话（保留的
+   子会话不 detach、不关句柄，留给下一次复用，插件卸载时统一释放）。
 
 插件不 import 任何 `@deepseek-ai/*` 包，也没有运行时依赖，只用 `node:` 内置模块。
 `tools`、`sessions`、`sessionPersistence` 由 DSH 注入。投影每一步都是尽力而为：服务缺失或
@@ -55,11 +57,13 @@
 | --- | --- |
 | `--brief <文件>` | 任务说明文件，总会传。 |
 | `--cwd <目录>` | 工作目录，总会传；子进程也在这个目录下跑。 |
-| `--log <文件>` | 完整输出日志，总会传。上级目录可能还不存在。 |
+| `--log <文件>` | 完整输出日志，只在 `logMode: "full"` 时传。上级目录可能还不存在。 |
 | `--model <名字>` | 可选，配了才传。 |
 | `--thinking <档位>` | 可选，配了才传。 |
 | `--tools <工具表>` | 可选，配了才传。 |
 | `--mode <text\|json>` | 投影开启（默认）且封装的 `--help` 里提到这个参数时，传 `--mode json`。投影关闭、或帮助里没这个参数时不传，封装保持纯文本行为（见「会话投影」）。 |
+| `--session-id <id>` | 要续跑的 Pi 会话（不存在就创建）。总与 `--session-dir` 一起传，且不会同时传 `--no-session`。 |
+| `--session-dir <目录>` | Pi 存放和查找该会话的目录。 |
 | `--help` | 每次开启投影的派活前先探测一次（stdin 忽略、短超时），据此决定能不能安全地传 `--mode json`。 |
 | `--approve` | 可选，配了才传。 |
 | 其它参数 | 配的 `args`，原样追加在最后。 |
@@ -75,7 +79,7 @@
 set -euo pipefail
 
 PI_BIN=${PI_BIN:-pi}
-brief="" cwd="$PWD" log=""
+brief="" cwd="$PWD" log="" session_id="" session_dir=""
 model="" thinking="" tools="" mode="text" approve=0
 
 while [ $# -gt 0 ]; do
@@ -83,6 +87,8 @@ while [ $# -gt 0 ]; do
     --brief)    brief=$2; shift 2 ;;
     --cwd)      cwd=$2; shift 2 ;;
     --log)      log=$2; shift 2 ;;
+    --session-id) session_id=$2; shift 2 ;;
+    --session-dir) session_dir=$2; shift 2 ;;
     --model)    model=$2; shift 2 ;;
     --thinking) thinking=$2; shift 2 ;;
     --tools)    tools=$2; shift 2 ;;
@@ -94,7 +100,12 @@ done
 
 [ -n "$brief" ] || { echo "pi-dev: 缺少 --brief" >&2; exit 2; }
 
-args=(--print --no-session)
+args=(--print)
+if [ -n "$session_id" ]; then
+  args+=(--session-id "$session_id" --session-dir "${session_dir:-$HOME/.dsh/pi-sessions}")
+else
+  args+=(--no-session)
+fi
 [ "$mode" = text ] || args+=(--mode "$mode")
 [ -n "$tools" ] && args+=(--tools "$tools")
 [ -n "$model" ] && args+=(--model "$model")
@@ -128,7 +139,10 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
   环境里已经有了就用环境里的），没有就提示先跑 `pi auth login deepseek`；
 - 把 `rules/PI-DEV-RULES.md` 拼在任务说明前面——这是作者自己的固定规矩，插件本身
   不需要它；用别的封装或者不想要这份规矩，忽略这个文件和这个封装即可；
-- 钉住 `deepseek-flash` 模型、加 `--no-session`、给一份默认工具表；
+- 钉住 `deepseek-flash` 模型、给一份默认工具表；
+- `--session-id <id>` / `--session-dir <目录>` 续跑（或创建）那个已存的 Pi 会话，不再加
+  `--no-session`；没给 `--session-dir` 时用 `$PI_DEV_SESSION_DIR` 或
+  `$HOME/.dsh/pi-sessions`；没给 `--session-id` 时仍保持原来的 `--no-session` 行为；
 - 把 `--mode text|json` 透传给 Pi：默认 `text` 完全不传 `--mode`，`json` 让 Pi 输出 NDJSON
   事件流（投影开启时插件要的就是这个）；
 - 传 `--log` 时用 `tee` 复制完整输出；
@@ -141,6 +155,7 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 | `PI_DEV_RULES` | `<封装真实目录>/../rules/PI-DEV-RULES.md` | 拼在任务说明前的固定规矩（先解析封装自己的软链）。 |
 | `PI_DEV_RECORD_DIR` | `$HOME/.dsh` | 派活记录目录，写 `pi-delegations.log`。 |
 | `PI_DEV_MODEL` | `deepseek-flash` | 默认钉住的模型。 |
+| `PI_DEV_SESSION_DIR` | `$HOME/.dsh/pi-sessions` | 没传 `--session-dir` 时 `--session-id` 的默认存储目录。 |
 
 插件的默认 `command` 仍然是 `$HOME/.dsh/bin/pi-dev`。想用自带封装，就把它复制到这个位置
 （或者建软链——封装会先把自己的软链解析成真实路径，包里的 `rules/PI-DEV-RULES.md` 照样
@@ -193,6 +208,8 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
         # model: deepseek-flash
         # tools: read,bash,edit,write,grep,find,ls
         # logDir: /home/me/.dsh/pi-logs
+        # logMode: summary
+        # sessionDir: /home/me/.dsh/pi-sessions
         # graceMs: 5000
         # projection: true
 ```
@@ -210,13 +227,16 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
 | `tools` | — | 填了就传 `--tools`。 |
 | `approve` | `false` | 为 `true` 就传 `--approve`。 |
 | `projection` | `true` | 把每次派活投影成 DSH 子会话。`false` 完全不投影，也不给封装传 `--mode`。 |
+| `logMode` | `summary` | `summary`（默认）插件自己写精简日志：任务首行、最终回答、每个工具一行、usage/stopReason/子会话 id。`full` 让封装 tee 完整输出（`--log`），JSON 模式下就是原始事件流，可能几十 MB。 |
 | `logDir` | `$HOME/.dsh/pi-logs` | 日志放这里，文件名是 `<YYYYMMDD-HHmmss>-<id 前 8 位>.log`。 |
+| `sessionDir` | `$HOME/.dsh/pi-sessions` | 续跑时要复用的 Pi 会话放这里，作为 `--session-dir` 传给封装。 |
 | `graceMs` | `5000` | 取消子进程时的 SIGTERM → SIGKILL 宽限期（毫秒）。 |
 | `maxOutputBytes` | `262144` | 单条输出（stdout 和 stderr 各算一条）在内存里的上限，超了留尾部。 |
 
 配置在挂载时就检查，配错当场报错，不会拖到第一次派活。规则：`graceMs` 和
-`maxOutputBytes` 必须是正有限数，`command`、`logDir` 必须是非空字符串，`args` 必须是
-字符串数组，`approve`/`projection` 必须是布尔。
+`maxOutputBytes` 必须是正有限数，`command`、`logDir`、`sessionDir` 必须是非空字符串，
+`logMode` 只能是 `"summary"` 或 `"full"`，`args` 必须是字符串数组，
+`approve`/`projection` 必须是布尔。
 
 ## 会话投影
 
@@ -241,8 +261,8 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
      带着未结算的调用关闭；
    - `agent_end`/`agent_settled` 只记下的中止标志；真正的 `turn/end`（`completed` / `aborted` /
      `error`）在子进程退出后统一追加；
-4. 最后 flush 两个会话、detach 子会话、关掉写句柄——不会留一个假的「运行中」会话，DSH 从
-   持久化里把它当只读历史读回来。
+4. 最后 flush 两个会话；子会话保留为 live（不 detach、写句柄不关），下一次调用可以直接追加
+   新 turn，插件卸载时统一释放。
 
 这个顺序不是好看：持久化日志回读时会逐条校验关系。`step/end` 时若还有已登记未结算的
 `tool/call` 会被拒；`turn/end` 时若还有打开的 step 会被拒；`tool/call` 的参数串必须和
@@ -254,10 +274,31 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
 cache/reasoning 计数）、真实的耗时与时间戳、运行结束状态。日志是持久化的，DSH 重启后依然
 看得见。
 
-本期仍然**不做**的：
+**限制。**
 
-- **运行中还没有转圈和 Stop 按钮**——事件会边跑边进日志，目录行也立刻出现，但网页界面还
-  不会给运行中的子会话显示进度、也不能一键停下（第 3 期）。
+- **子会话没有独立 Stop**。只有主对话里取消派活才会中止工具调用：SIGTERM 掉 Pi（宽限期后
+  SIGKILL），并把子会话的 turn 收成 `aborted`。网页把子会话当只读历史展示，没有单个子会话的
+  停止按钮。独立 Stop 需要可续跑的 activation 形态，这期不做，留给以后。
+- **保留的子会话在插件卸载前一直是 live**。复用靠的就是这一点，所以 DSH 里会一直看到这行。
+  DSH 重启后就不能续了：插件只认自己进程里开过的会话。
+
+## 会话复用
+
+每个 `pi` 结果都带 `session`（子会话 id）。下一次调用把它传回来就是续跑：
+
+- 同一个 DSH 子会话追加一个新 turn（编号 = 已记录的最后一个 turn + 1），带自己的任务原文和
+  自己的 step 编号（每个 turn 的 step 从 1 开始）；不会再写 `subagent/descriptor`，也不会再写
+  父会话的 `subagent/catalog`；
+- Pi 用 `--session-id <id> --session-dir <sessionDir>` 起进程，Pi 自己的对话（读过的文件、
+  做过的决定、工具历史）都还在，一般更省 token，也不用重读项目；
+- 子会话在每次 run 结束后保留（flush 但不 detach、不 close），直到下一次续跑或插件卸载时由
+  `ctx.effect` 释放；
+- 只有在本进程里开过的会话能续。DSH 重启后插件会返回清楚的错误：
+  `session <id> is not continuable in this host process; omit session to start a new one`；
+- 同一个 session 同一时间只能跑一个任务；并发调用会报
+  `session <id> is already running`。
+
+Pi 自己的会话文件会堆在 `sessionDir` 下；它们不是 DSH 日志，清理脚本不会删。
 
 **降级。** 投影是尽力而为的，永远不会影响派活本身：
 
@@ -276,20 +317,42 @@ cache/reasoning 计数）、真实的耗时与时间戳、运行结束状态。�
 
 - **只有一个 `pi` 工具**：挂载时注册。工具描述告诉模型它在把任务派给本机 Pi，期间会产生一个
   可查看的子会话。参数是 `prompt`（必填）、`cwd`（可选，默认用调用方会话的工作目录）、
-  `label`（可选，默认取 `prompt` 第一行，最多 60 字）。
-- **工具返回值**是 `{ output, childSessionId, logPath, stopReason }`（失败时多一个
+  `label`（可选，默认取 `prompt` 第一行，最多 60 字）、`session`（可选，之前某次调用返回的
+  子会话 id，用来接着干）。
+- **工具返回值**是 `{ output, childSessionId, session, logPath, stopReason }`（失败时多一个
   `diagnostic`）。模型看到的文字是：最终回答、可选的诊断、`subagent session: <id>` 一行、
-  `full output: <日志路径>` 一行。
+  `to continue this delegation, pass session: <id>` 提示、`full output: <日志路径>` 一行。
 - **结果怎么映射**：退出码 `0` → `completed`。别的退出码 → `error`，`diagnostic` 是
   `pi-dev exit code N` 加 stderr 尾部，整体不超过 4096 字节。`exec.signal` 取消 → 先
   SIGTERM，宽限期后 SIGKILL，结果 `aborted`，已经收到的输出照留。起进程失败也是 `error`
   结果，不会抛出去。
 - **最终回答**取 Pi 最后一条非空助手消息的文本；一条结构化记录都解析不出来时，用整段
   stdout（去掉尾部空白）。
-- **每次派活互不干扰**：每个 run 有自己的临时目录、自己的子会话 id、自己的进程状态，并发
-  跑也不会串。
+- **每次新派活互不干扰**：每个新 run 有自己的临时目录、自己的子会话 id、自己的进程状态，
+  并发跑也不会串；续跑按设计共享它自己的会话，同一个会话的两次 run 不会重叠。
 - **临时目录一定会删**，失败也删。里面是任务说明，可能含业务内容；`logDir` 里的日志不删，
   因为它是返回给模型的指针。
+
+## 日志与清理
+
+`logMode`（默认 `summary`）决定一次派活往
+`<logDir>/<YYYYMMDD-HHmmss>-<id 前 8 位>.log` 写什么：
+
+- `summary`——插件自己写：任务首行（最多 100 字）、最终回答全文、每个工具一行
+  `tool <name> <durationMs>ms <ok|error>`，最后一行是汇总 usage、`stopReason` 和子会话 id。
+  一般几 KB。
+- `full`——让封装 tee Pi 的完整输出（`--log`），JSON 模式下就是原始事件流，长任务可能几十 MB。
+
+工具返回的 `logPath` 始终指向真正写出来的文件（summary 写失败时为空）。旧日志不会自动删：
+
+```bash
+node scripts/cleanup.mjs [--days 14] [--dry-run] [--sessions]
+```
+
+默认删除 `$HOME/.dsh/pi-logs` 下超过 N 天的文件，打印删除数量和释放空间；`--dry-run` 只列不删。
+`--sessions` 额外**列出**（绝不删除）`$HOME/.dsh/sessions` 下超过 N 天、且含
+`session.v4.jsonl.zstd` 的会话目录，并提示：删会话属于带外操作，最好先停 DSH，sqlite 索引
+可能留下陈旧记录。候选里父会话和子会话都有（origin 在压缩日志里，脚本不做区分）。
 
 ## 开发与自测
 
@@ -297,7 +360,7 @@ cache/reasoning 计数）、真实的耗时与时间戳、运行结束状态。�
 git clone <repo> && cd dsh-subagent-pi
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 26 个单元测试，全绿，不联网、不花模型调用
+node --test test/            # 42 个单元测试，全绿，不联网、不花模型调用
 node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型调用
 ```
 
@@ -309,7 +372,13 @@ node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型
   顺序与 payload（描述符 v3、目录 v0 严格字段、step 括号、reasoning/text/tool-call 块、
   `tool/call` 与 `tool/result` 的配对与参数一致性、usage 映射、`stream: []`）、多轮 step 编号、
   纯文本与空 stdout 降级、error / abort 结束状态（含取消时为未结算调用补结果）、SIGKILL 升级、
-  服务缺失与追加被拒降级、超长行、并发隔离、配置校验、HOME 派生的默认值、临时目录清理。
+  服务缺失与追加被拒降级、超长行、并发隔离、配置校验、HOME 派生的默认值、临时目录清理；
+  第 3 期新增：精简/完整日志、会话复用（turn 编号、不重复 descriptor/catalog、Pi 会话参数）、
+  未知和并发 `session`、卸载时释放句柄。
+- `test/cleanup.test.js` 用临时 `$HOME` 跑 `scripts/cleanup.mjs`：`--dry-run` 不删、`--days`
+  筛选、删除时保留新文件、`--sessions` 只列不删。
+- `test/pi-dev.test.js` 用假 `PI_BIN` 跑自带封装，检查 Pi 的 argv：`--session-id`/`--session-dir`
+  取代 `--no-session`、默认会话目录、以及不带 id 时原来的 `--no-session` 行为。
 - `test/real-pi.mjs` 是手动端到端：用真 `pi-dev` 跑一条「只回一行字」的短任务，
   传 `--tools read`，说明里明确不许改文件。它没有 DSH 容器，所以顺带验证「投影不可用 →
   只 warn、继续返回」这条降级路径。`NODE_TEST_CONTEXT` 已设置时它直接跳过，

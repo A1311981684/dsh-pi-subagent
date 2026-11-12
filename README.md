@@ -26,8 +26,11 @@ The plugin deliberately owns almost nothing about *how* Pi runs. That stays insi
 2. the credential handoff from Pi's own `auth.json` into the environment (never printed);
 3. the fixed rules prepended to every brief;
 4. the pinned model (`deepseek-flash` by default);
-5. `--no-session`, so delegations leave no Pi session behind;
-6. `--log` tee'ing the full output to a file;
+5. Pi's session storage: the plugin passes `--session-id` and `--session-dir`, so a
+   delegation can be continued with Pi's own memory; a wrapper called with no id still runs
+   `--no-session`;
+6. `--log` tee'ing the full output to a file (the plugin asks for it only in
+   `logMode: "full"`);
 7. one line appended to the delegation record after every run.
 
 The plugin itself only does two things:
@@ -42,8 +45,8 @@ The plugin itself only does two things:
    parent's `subagent/catalog` row *before* spawning the child, then stream one event per
    Pi record: `step/start`…`step/end` per model call, `assistant/message` with
    reasoning/text/tool-call blocks, `tool/call` + `tool/result` for every tool execution,
-   and a `turn/end` with the run's real reason; finally flush both sessions and release
-   the child.
+   and a `turn/end` with the run's real reason; finally flush both sessions (a retained
+   child stays open so a later call can append another turn, until the plugin unloads).
 
 It imports no `@deepseek-ai/*` package and has no runtime dependencies — only `node:`
 built-ins. DSH injects the `tools`, `sessions`, and `sessionPersistence` services. Every
@@ -65,11 +68,13 @@ The plugin knows nothing about Pi's arguments; it only knows this contract:
 | --- | --- |
 | `--brief <file>` | Path to the brief. Always passed. The file holds the task text. |
 | `--cwd <dir>` | Working directory for the child. Always passed; also the child's process cwd. |
-| `--log <file>` | Full-output log file. Always passed; the parent directory may not exist yet. |
+| `--log <file>` | Full-output log file. Passed only in `logMode: "full"`; the parent directory may not exist yet. |
 | `--model <name>` | Optional, passed only when configured. |
 | `--thinking <level>` | Optional, passed only when configured. |
 | `--tools <list>` | Optional, passed only when configured. |
 | `--mode <text\|json>` | Passed as `--mode json` while session projection is on (the default) and the wrapper's own `--help` advertises the flag. No `--mode` is passed when projection is off or the help text does not mention it, so the wrapper keeps its text behaviour (see [Session projection](#session-projection)). |
+| `--session-id <id>` | The Pi session to continue (created when absent). Always passed together with `--session-dir`; `--no-session` is never passed alongside it. |
+| `--session-dir <dir>` | Where Pi stores and looks up that session. |
 | `--help` | Probed once per projected run (stdin ignored, short timeout) to decide whether `--mode json` is safe to pass. |
 | `--approve` | Optional, passed only when configured. |
 | anything else | `config.args`, appended last, verbatim. |
@@ -85,7 +90,7 @@ A minimal wrapper that satisfies the contract:
 set -euo pipefail
 
 PI_BIN=${PI_BIN:-pi}
-brief="" cwd="$PWD" log=""
+brief="" cwd="$PWD" log="" session_id="" session_dir=""
 model="" thinking="" tools="" mode="text" approve=0
 
 while [ $# -gt 0 ]; do
@@ -93,6 +98,8 @@ while [ $# -gt 0 ]; do
     --brief)    brief=$2; shift 2 ;;
     --cwd)      cwd=$2; shift 2 ;;
     --log)      log=$2; shift 2 ;;
+    --session-id) session_id=$2; shift 2 ;;
+    --session-dir) session_dir=$2; shift 2 ;;
     --model)    model=$2; shift 2 ;;
     --thinking) thinking=$2; shift 2 ;;
     --tools)    tools=$2; shift 2 ;;
@@ -104,7 +111,12 @@ done
 
 [ -n "$brief" ] || { echo "pi-dev: --brief is required" >&2; exit 2; }
 
-args=(--print --no-session)
+args=(--print)
+if [ -n "$session_id" ]; then
+  args+=(--session-id "$session_id" --session-dir "${session_dir:-$HOME/.dsh/pi-sessions}")
+else
+  args+=(--no-session)
+fi
 [ "$mode" = text ] || args+=(--mode "$mode")
 [ -n "$tools" ] && args+=(--tools "$tools")
 [ -n "$model" ] && args+=(--model "$model")
@@ -144,7 +156,11 @@ author's workflow:
 - `rules/PI-DEV-RULES.md` prepended to the brief — these are the author's own working
   rules, not something the plugin needs; if you use your own wrapper or do not want them,
   ignore that file and this wrapper;
-- `deepseek-flash` pinned as the model, `--no-session`, and a default tool list;
+- `deepseek-flash` pinned as the model and a default tool list;
+- `--session-id <id>` / `--session-dir <dir>` continue (or create) that stored Pi session
+  instead of adding `--no-session`; with no `--session-dir` the wrapper uses
+  `$PI_DEV_SESSION_DIR` or `$HOME/.dsh/pi-sessions`, and with no `--session-id` it keeps the
+  old `--no-session` behaviour;
 - `--mode text|json` passed through to Pi: `text` is the default and adds no `--mode` at
   all, `json` makes Pi emit its NDJSON event stream (what the plugin asks for while
   projection is on);
@@ -159,6 +175,7 @@ author's workflow:
 | `PI_DEV_RULES` | `<wrapper's real dir>/../rules/PI-DEV-RULES.md` | Fixed rules file to prepend (symlinks to the wrapper are resolved first). |
 | `PI_DEV_RECORD_DIR` | `$HOME/.dsh` | Directory for `pi-delegations.log`. |
 | `PI_DEV_MODEL` | `deepseek-flash` | Default model pin. |
+| `PI_DEV_SESSION_DIR` | `$HOME/.dsh/pi-sessions` | Default storage for `--session-id` when `--session-dir` is omitted. |
 
 The plugin's default `command` is still `$HOME/.dsh/bin/pi-dev`. To use the bundled
 wrapper, either copy it there or symlink it (the wrapper resolves its own real path, so
@@ -213,6 +230,8 @@ to the profile's own `cordis.patch.yml`. One row is enough; the plugin registers
         # model: deepseek-flash
         # tools: read,bash,edit,write,grep,find,ls
         # logDir: /home/me/.dsh/pi-logs
+        # logMode: summary
+        # sessionDir: /home/me/.dsh/pi-sessions
         # graceMs: 5000
         # projection: true
 ```
@@ -230,14 +249,17 @@ All fields are optional; the bundle patch passes none of them.
 | `tools` | — | When set, passed as `--tools`. |
 | `approve` | `false` | When `true`, passes `--approve`. |
 | `projection` | `true` | Project each run into a DSH child session. `false` skips the projection entirely and passes no `--mode` to the wrapper. |
+| `logMode` | `summary` | `summary` (default) writes a compact log itself: task first line, final answer, one line per tool, usage/stop reason/session. `full` asks the wrapper to tee the whole output (`--log`), which in JSON mode is the raw event stream and can be tens of MB. |
 | `logDir` | `$HOME/.dsh/pi-logs` | Where logs go, named `<YYYYMMDD-HHmmss>-<id 8 chars>.log`. |
+| `sessionDir` | `$HOME/.dsh/pi-sessions` | Where Pi stores the sessions a continuation reuses; passed as `--session-dir`. |
 | `graceMs` | `5000` | SIGTERM → SIGKILL grace for a cancelled child. |
 | `maxOutputBytes` | `262144` | In-memory cap per collected stream (stdout and stderr separately); the tail is kept. |
 
 Validation happens at mount time, so a bad value is a load error rather than a surprise on
 the first delegation: `graceMs` and `maxOutputBytes` must be positive finite numbers,
-`command` and `logDir` must be non-empty strings, `args` must be an array of strings, and
-`approve`/`projection` must be booleans.
+`command`, `logDir`, and `sessionDir` must be non-empty strings, `logMode` must be
+`"summary"` or `"full"`, `args` must be an array of strings, and `approve`/`projection`
+must be booleans.
 
 ## Session projection
 
@@ -268,8 +290,8 @@ started, and each JSON record is projected as it arrives:
      step never closes with an unresolved call;
    - `agent_end`/`agent_settled` just mark the run's abort flag; the `turn/end` with the real
      reason (`completed`, `aborted`, or `error`) is appended once the child exits;
-4. both sessions are flushed, the child is detached, and its write handle is released — so
-   nothing synthetic stays "running" and DSH reads the log back as read-only history.
+4. both sessions are flushed; the child is then kept live (not detached, handle open) so a
+   later call can append the next turn, and it is released when the plugin unloads.
 
 The order is not cosmetic: the durable log is relationship-checked when it is restored. A
 `step/end` is rejected while an advertised `tool/call` has no `tool/result`, a `turn/end` is
@@ -284,11 +306,16 @@ arguments and results, each step's token usage (`inputTokens`/`outputTokens` plu
 cache/reasoning counters Pi reported), real timestamps/durations, and how the run ended.
 Because the log is durable, this survives a DSH restart.
 
-Still **not** in this phase:
+**Limitations.**
 
-- **no live running state and no Stop button in the UI** — events stream into the log and
-  the row appears immediately, but the web UI does not yet show a spinner or offer a stop
-  control for the running child (phase 3).
+- **No independent Stop for a child.** Cancelling the delegation in the main conversation
+  aborts the tool call, which SIGTERMs Pi (SIGKILL after `graceMs`) and closes the child's
+  turn as `aborted`; that is the only supported stop. The UI renders a child session as
+  read-only history and offers no per-child stop control. An independent Stop needs the
+  continuable-activation form, so it is deliberately left for a later phase.
+- **Retained sessions stay live until unload.** That is what makes reuse possible, so DSH
+  shows the child row while it is retained. A DSH restart ends continuability: the plugin
+  only knows the sessions it opened in this process.
 
 **Degradation.** The projection is best-effort and never affects the delegation:
 
@@ -308,16 +335,40 @@ Still **not** in this phase:
 - a tool result whose call was never advertised is skipped with a `warn`; a line over the
   2 MiB cap is dropped with a `warn`.
 
+## Session reuse
+
+Every `pi` result carries `session` (the child session id). Passing it back on the next call
+continues that delegation:
+
+- the same DSH child session gets a new turn (number = last recorded turn + 1) with its own
+  task text and its own step numbering (steps restart at 1 in each turn); no second
+  `subagent/descriptor` and no second parent `subagent/catalog` row;
+- Pi is started with `--session-id <id> --session-dir <sessionDir>`, so Pi's own conversation
+  (files read, decisions, tool history) is still there — the task usually gets cheaper and
+  does not re-read the project;
+- the child session is retained after each run (flushed, but not detached or closed) until a
+  later turn or plugin unload, where `ctx.effect` releases the handles;
+- a session is only continuable inside the host process that opened it. After a DSH restart
+  the plugin returns a clear error: `session <id> is not continuable in this host process;
+  omit session to start a new one`;
+- only one run per session at a time: a concurrent call fails with `session <id> is already
+  running`.
+
+Pi's own session files accumulate under `sessionDir`; they are not the DSH logs and the
+cleanup script does not delete them.
+
 ## Behavior details
 
 - **One `pi` tool.** The plugin registers it at mount time; the description tells the model
   it delegates to the local Pi agent and that a child session is created. Parameters are
   `prompt` (required), `cwd` (optional; defaults to the calling session's working
-  directory), and `label` (optional; defaults to the first line of `prompt`, at most 60
-  characters).
-- **The tool value** is `{ output, childSessionId, logPath, stopReason }` (plus
+  directory), `label` (optional; defaults to the first line of `prompt`, at most 60
+  characters), and `session` (optional; the child session id from an earlier call, to
+  continue that delegation).
+- **The tool value** is `{ output, childSessionId, session, logPath, stopReason }` (plus
   `diagnostic` when the run failed). The model sees the final answer, an optional
-  diagnostic, a `subagent session: <id>` line, and a `full output: <log path>` line.
+  diagnostic, a `subagent session: <id>` line, a `to continue this delegation, pass session:
+  <id>` hint, and a `full output: <log path>` line.
 - **Result mapping.** Exit code `0` → `stopReason: 'completed'`. Any other exit code →
   `'error'`, with `diagnostic` set to `pi-dev exit code N` plus the tail of stderr, capped
   at 4096 bytes. Cancellation through `exec.signal` → `'aborted'` after SIGTERM (and
@@ -325,11 +376,37 @@ Still **not** in this phase:
   `'error'` result, never a thrown tool.
 - **The final answer** is the text of the last non-empty assistant message Pi reported. If
   no structured record parses, it is the whole stdout (trailing whitespace trimmed).
-- **Each run is isolated.** Every run gets its own scratch directory, its own child-session
-  id, and its own process state, so concurrent runs cannot observe each other.
+- **Each new delegation is isolated.** It gets its own scratch directory, its own
+  child-session id, and its own process state, so concurrent runs cannot observe each other;
+  a continuation shares its own session by design, and two runs of one session never overlap.
 - **The scratch directory is always removed**, even when the run fails. It holds the brief,
-  which contains the task text; the tee'd log stays in `logDir` because it is the pointer
+  which contains the task text; the log stays in `logDir` because it is the pointer
   returned to the model.
+
+## Logs and cleanup
+
+`logMode` (default `summary`) decides what one delegation writes to
+`<logDir>/<YYYYMMDD-HHmmss>-<id 8 chars>.log`:
+
+- `summary` — the plugin writes the file itself: the task's first line (at most 100
+  characters), the final answer, one `tool <name> <durationMs>ms <ok|error>` line per tool,
+  and one line with the summed usage, `stopReason`, and child session id. Usually a few KB.
+- `full` — the wrapper is asked to tee Pi's whole output (`--log`), which in JSON mode is the
+  raw event stream and can reach tens of MB on a long task.
+
+The tool's `logPath` always names the file that was actually written (empty when the summary
+write failed). Old logs are never removed automatically:
+
+```bash
+node scripts/cleanup.mjs [--days 14] [--dry-run] [--sessions]
+```
+
+It deletes `$HOME/.dsh/pi-logs` files older than N days and prints the count and the freed
+space; `--dry-run` only lists them. `--sessions` additionally **lists** (never deletes) old
+session directories under `$HOME/.dsh/sessions` that contain `session.v4.jsonl.zstd`, with
+the caveats that deleting sessions is an out-of-band operation, DSH should be stopped first,
+and the sqlite index may keep stale rows. The candidates include parent and child sessions
+(the origin is inside the compressed log, so the script does not try to tell them apart).
 
 ## Development and testing
 
@@ -337,7 +414,7 @@ Still **not** in this phase:
 git clone <repo> && cd dsh-subagent-pi
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 26 unit tests, all green, no network and no model call
+node --test test/            # 42 unit tests, all green, no network and no model call
 node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
 ```
 
@@ -354,7 +431,14 @@ node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
   empty-stdout degradation, error/abort end states (including a pending call resolved on
   cancel), SIGKILL escalation, missing-service and rejected-append degradation, an
   oversized line, concurrent runs, config validation, HOME-derived defaults, and
-  scratch-directory cleanup.
+  scratch-directory cleanup; the phase-3 cases cover the compact and full log modes, session
+  continuation (turn numbering, no duplicate descriptor/catalog, Pi session argv), unknown
+  and concurrent `session` ids, and the unload effect.
+- `test/cleanup.test.js` runs `scripts/cleanup.mjs` against a temporary `$HOME`: `--dry-run`
+  never deletes, `--days` filters, deletion keeps fresh files, and `--sessions` only lists.
+- `test/pi-dev.test.js` executes the bundled wrapper with a fake `PI_BIN` and checks the Pi
+  argv: `--session-id`/`--session-dir` replace `--no-session`, the default session directory,
+  and the unchanged `--no-session` behaviour when no id is given.
 - `test/real-pi.mjs` is the manual end-to-end check: a real `pi-dev` run whose brief asks
   for one line of text with `--tools read` and no file changes. It has no DSH container, so
   it also exercises the "projection unavailable → warn and continue" path. It exits as a

@@ -10,3 +10,5 @@
  * and costs a model call, so it is opt-in via `node test/real-pi.mjs`.
  */
 import './tool.test.js';
+import './cleanup.test.js';
+import './pi-dev.test.js';
