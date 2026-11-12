@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-pi",
   "version": "0.1.0",
-  "description": "Pi (pi-dev) as an out-of-process DSH subagent backend: one pi-dev child per run, results mapped onto the subagent seam",
+  "description": "Pi (pi-dev) as a DSH subagent: one pi-dev child process per delegation, projected into an inspectable, durable DSH child session",
   "author": "Asta Zhao",
   "license": "MIT",
   "type": "module",

@@ -9,4 +9,4 @@
  * `test/real-pi.mjs` is deliberately not imported: it runs the real `pi-dev`
  * and costs a model call, so it is opt-in via `node test/real-pi.mjs`.
  */
-import './provider.test.js';
+import './tool.test.js';

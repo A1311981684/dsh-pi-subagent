@@ -1,12 +1,1 @@
-# Bundle patch layer: Pi as an out-of-process DSH subagent backend.
-# The provider runs one `pi-dev` child per delegation; the tool exposes it to
-# the model as `pi`.
-- insert:
-    - id: subagent-pi
-      name: dsh-subagent-pi
-    - id: tool-subagent-pi
-      name: "@deepseek-ai/dsh-tool-subagent"
-      config:
-        provider: pi
-        toolName: pi
-        maxDepth: provider-managed
+- insert: [{ id: subagent-pi, name: dsh-subagent-pi, config: {} }]

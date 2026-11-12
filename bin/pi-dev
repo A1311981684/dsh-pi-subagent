@@ -3,7 +3,7 @@
 #
 # Usage:
 #   pi-dev --brief <file|-> [--cwd dir] [--model model] [--thinking level]
-#          [--tools list] [--log file] [--approve]
+#          [--tools list] [--mode text|json] [--log file] [--approve]
 #
 # The fixed rules (rules/PI-DEV-RULES.md next to this script) are prepended to
 # the brief. Every run uses a throwaway state directory: the home directory is
@@ -54,6 +54,9 @@ Usage: pi-dev --brief <file|-> [options]
                      (default deepseek-flash; set PI_DEV_MODEL to change it)
   --thinking <level> off|minimal|low|medium|high|xhigh|max
   --tools <list>     Override the tools; default read,bash,edit,write,grep,find,ls
+  --mode <mode>      text (default) or json: json emits Pi's NDJSON event stream on
+                     stdout instead of the plain final answer. Passed to Pi as
+                     --mode json; the default text mode passes no --mode at all.
   --log <file>       Also tee the full output to this file
   --approve          Trust the Pi project config in the working directory
   -h, --help         Show this text
@@ -68,6 +71,7 @@ cwd="$PWD"
 model=""
 thinking=""
 tools="$DEFAULT_TOOLS"
+mode="text"
 log=""
 approve=0
 
@@ -78,12 +82,18 @@ while [ $# -gt 0 ]; do
     --model)    [ $# -ge 2 ] || die "--model needs a model name"; model=$2; shift 2 ;;
     --thinking) [ $# -ge 2 ] || die "--thinking needs a level"; thinking=$2; shift 2 ;;
     --tools)    [ $# -ge 2 ] || die "--tools needs a list"; tools=$2; shift 2 ;;
+    --mode)     [ $# -ge 2 ] || die "--mode needs text or json"; mode=$2; shift 2 ;;
     --log)      [ $# -ge 2 ] || die "--log needs a file path"; log=$2; shift 2 ;;
     --approve)  approve=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *)          die "unknown argument: $1 (see --help)" ;;
   esac
 done
+
+case "$mode" in
+text|json) ;;
+*) die "--mode must be text or json, got: $mode" ;;
+esac
 
 [ -n "$brief" ] || die "missing --brief (the brief file, or - for standard input)"
 command -v "$PI_BIN" >/dev/null 2>&1 || die "Pi CLI not found: $PI_BIN (install it or set PI_BIN)"
@@ -131,6 +141,7 @@ fi
 prompt=$(printf '%s\n\n---\n\n# 本次任务\n\n%s\n' "$(cat "$RULES")" "$brief_text")
 
 args=(--print --no-session --tools "$tools")
+[ "$mode" = text ] || args+=(--mode "$mode")
 [ -n "$model" ] || model=$DEFAULT_MODEL
 args+=(--model "$model")
 [ -n "$thinking" ] && args+=(--thinking "$thinking")
