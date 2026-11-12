@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# pi-dev — run one development task through the local Pi coding agent.
+#
+# Usage:
+#   pi-dev --brief <file|-> [--cwd dir] [--model model] [--thinking level]
+#          [--tools list] [--log file] [--approve]
+#
+# The fixed rules (rules/PI-DEV-RULES.md next to this script) are prepended to
+# the brief. Every run uses a throwaway state directory: the home directory is
+# read-only inside a DSH sandbox, and Pi would otherwise fail with EROFS.
+set -euo pipefail
+
+# Resolve this script's real path before taking its directory: `npm install -g`
+# symlinks bin/pi-dev into node_modules/.bin, so $0 is the link and dirname $0
+# would point at .bin, where there is no ../rules. `readlink -f` is GNU-only and
+# absent on BSD/macOS, so walk the symlink chain by hand: POSIX `readlink` reads
+# one link, relative targets are joined to the link's directory, and the walk is
+# capped to survive a symlink loop. Nothing here may abort the run under
+# `set -e`: readlink failures are swallowed, and if the chain never resolves the
+# rule-file check below still reports a clear "fixed rules not found".
+self=$0
+hops=0
+while [ -h "$self" ] && [ "$hops" -lt 40 ]; do
+  hops=$((hops + 1))
+  target=$(readlink "$self" 2>/dev/null) || target=""
+  [ -n "$target" ] || break
+  case $target in
+    /*) self=$target ;;
+    *)  self=$(dirname "$self")/$target ;;
+  esac
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$self")" 2>/dev/null && pwd) \
+  || SCRIPT_DIR=$(cd -P "$(dirname "$0")" 2>/dev/null && pwd) \
+  || SCRIPT_DIR=$(dirname "$0")
+
+PI_BIN=${PI_BIN:-pi}
+RULES=${PI_DEV_RULES:-$SCRIPT_DIR/../rules/PI-DEV-RULES.md}
+DEFAULT_TOOLS="read,bash,edit,write,grep,find,ls"
+# The delegation model: Pi's throwaway config directory has no settings.json, so
+# without an explicit pin Pi falls back to its built-in default, which may differ
+# from the user's installed Pi default (deepseek-flash). Pin it here; override
+# with PI_DEV_MODEL.
+DEFAULT_MODEL=${PI_DEV_MODEL:-deepseek-flash}
+
+die() { printf 'pi-dev: %s\n' "$*" >&2; exit 2; }
+
+usage() {
+  cat <<'EOF'
+Usage: pi-dev --brief <file|-> [options]
+
+  --brief <file|->   Brief file; - reads it from standard input (required)
+  --cwd <dir>        Working directory, defaults to the current directory
+  --model <model>    Override the model, e.g. deepseek-flash or deepseek:high
+                     (default deepseek-flash; set PI_DEV_MODEL to change it)
+  --thinking <level> off|minimal|low|medium|high|xhigh|max
+  --tools <list>     Override the tools; default read,bash,edit,write,grep,find,ls
+  --log <file>       Also tee the full output to this file
+  --approve          Trust the Pi project config in the working directory
+  -h, --help         Show this text
+
+The fixed rules are prepended to the brief automatically. The brief is written
+by whoever delegates the task.
+EOF
+}
+
+brief=""
+cwd="$PWD"
+model=""
+thinking=""
+tools="$DEFAULT_TOOLS"
+log=""
+approve=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --brief)    [ $# -ge 2 ] || die "--brief needs a file path or -"; brief=$2; shift 2 ;;
+    --cwd)      [ $# -ge 2 ] || die "--cwd needs a directory"; cwd=$2; shift 2 ;;
+    --model)    [ $# -ge 2 ] || die "--model needs a model name"; model=$2; shift 2 ;;
+    --thinking) [ $# -ge 2 ] || die "--thinking needs a level"; thinking=$2; shift 2 ;;
+    --tools)    [ $# -ge 2 ] || die "--tools needs a list"; tools=$2; shift 2 ;;
+    --log)      [ $# -ge 2 ] || die "--log needs a file path"; log=$2; shift 2 ;;
+    --approve)  approve=1; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+[ -n "$brief" ] || die "missing --brief (the brief file, or - for standard input)"
+command -v "$PI_BIN" >/dev/null 2>&1 || die "Pi CLI not found: $PI_BIN (install it or set PI_BIN)"
+[ -r "$RULES" ] || die "fixed rules not found: $RULES (set PI_DEV_RULES or keep rules/PI-DEV-RULES.md next to this script)"
+[ -d "$cwd" ] || die "working directory does not exist: $cwd"
+
+if [ "$brief" = "-" ]; then
+  brief_text=$(cat)
+else
+  [ -r "$brief" ] || die "cannot read the brief: $brief"
+  brief_text=$(cat "$brief")
+fi
+[ -n "${brief_text//[[:space:]]/}" ] || die "the brief is empty"
+
+# One clean state directory per run. The home directory is read-only inside a
+# DSH sandbox, so Pi cannot write to ~/.pi.
+state=$(mktemp -d "${TMPDIR:-/tmp}/pi-dev-state.XXXXXX")
+trap 'rm -rf "$state"' EXIT
+mkdir -p "$state/agent"
+chmod 700 "$state"
+
+export PI_CODING_AGENT_DIR="$state/agent"
+export PI_SKIP_VERSION_CHECK=1
+
+# Reuse the DeepSeek credential Pi saved itself: put it in the environment only,
+# never print it, never write it to disk. If it is already set, keep it.
+if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+  auth_file="${HOME:-}/.pi/agent/auth.json"
+  [ -r "$auth_file" ] \
+    || die "Pi has no saved DeepSeek credential; run: pi auth login deepseek"
+  DEEPSEEK_API_KEY=$(node --input-type=module -e '
+import { readFileSync } from "node:fs";
+try {
+  const data = JSON.parse(readFileSync(process.argv[1], "utf8"));
+  const key = data?.deepseek?.key;
+  if (typeof key !== "string" || key === "") process.exit(1);
+  process.stdout.write(key);
+} catch {
+  process.exit(1);
+}
+' "$auth_file") || die "could not read the DeepSeek credential from $auth_file"
+  export DEEPSEEK_API_KEY
+fi
+
+prompt=$(printf '%s\n\n---\n\n# 本次任务\n\n%s\n' "$(cat "$RULES")" "$brief_text")
+
+args=(--print --no-session --tools "$tools")
+[ -n "$model" ] || model=$DEFAULT_MODEL
+args+=(--model "$model")
+[ -n "$thinking" ] && args+=(--thinking "$thinking")
+[ "$approve" = 1 ] && args+=(--approve)
+
+cd "$cwd"
+started_at=$(date '+%F %T')
+
+if [ -n "$log" ]; then
+  mkdir -p "$(dirname "$log")" 2>/dev/null || true
+  set +e
+  "$PI_BIN" "${args[@]}" "$prompt" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+else
+  set +e
+  "$PI_BIN" "${args[@]}" "$prompt"
+  rc=$?
+  set -e
+fi
+
+# Delegation record: one line per run, so it is easy to see afterwards who
+# delegated what and which model ran. Skip it when the directory is read-only;
+# it must never block the task.
+record_dir=${PI_DEV_RECORD_DIR:-${HOME:-}/.dsh}
+brief_first=$(printf '%s\n' "$brief_text" \
+  | grep -v '^[[:space:]]*$' | grep -v '^#' | head -n 1 | cut -c 1-60)
+[ -n "$brief_first" ] || brief_first=$(printf '%s\n' "$brief_text" | grep -v '^[[:space:]]*$' | head -n 1 | cut -c 1-60)
+if mkdir -p "$record_dir" 2>/dev/null \
+   && printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${rc}" "$model" "$cwd" "$started_at" "$(date '+%F %T')" "$brief_first" \
+      >> "$record_dir/pi-delegations.log" 2>/dev/null; then
+  :
+fi
+
+exit "$rc"

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Pi subagent (dsh-subagent-pi)",
+    "description": "Pi as an out-of-process DSH subagent backend: one pi-dev child per delegation, with the child's exit facts mapped onto the subagent seam."
+  }
+}

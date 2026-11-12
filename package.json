@@ -1,0 +1,67 @@
+{
+  "name": "dsh-subagent-pi",
+  "version": "0.1.0",
+  "description": "Pi (pi-dev) as an out-of-process DSH subagent backend: one pi-dev child per run, results mapped onto the subagent seam",
+  "author": "Asta Zhao",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "bin": {
+    "pi-dev": "./bin/pi-dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/A1311981684/dsh-subagent-pi.git"
+  },
+  "homepage": "https://github.com/A1311981684/dsh-subagent-pi",
+  "bugs": {
+    "url": "https://github.com/A1311981684/dsh-subagent-pi/issues"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "rules",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "LICENSE",
+    "README.md",
+    "README.zh.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "subagent",
+    "pi"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.2-rc.1+": "compatible"
+      }
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "test:real": "node test/real-pi.mjs"
+  }
+}

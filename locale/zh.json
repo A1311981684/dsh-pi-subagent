@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Pi 子智能体（dsh-subagent-pi）",
+    "description": "把本机的 Pi（pi-dev）接成 DSH 的外部子智能体后端：每次派活起一个 pi-dev 进程，把它的退出结果映射成 DSH 的子智能体结果。"
+  }
+}
