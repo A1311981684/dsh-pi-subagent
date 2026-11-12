@@ -1,5 +1,7 @@
 # dsh-pi-subagent
 
+<p align="center"><img src="icon.svg" width="96" height="96" alt="dsh-pi-subagent icon"></p>
+
 English | [中文](README.zh.md)
 
 A [DeepSeek Harness](https://github.com/deepseek-ai) (DSH) bundle that turns a local

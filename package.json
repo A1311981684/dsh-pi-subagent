@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-subagent",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Pi (pi-dev) as a DSH subagent: one pi-dev child process per delegation, projected into an inspectable, durable DSH child session",
   "author": "Asta Zhao",
   "license": "MIT",
@@ -27,6 +27,7 @@
   },
   "files": [
     "lib",
+    "icon.svg",
     "bin",
     "rules",
     "cordis.patch.yml",
@@ -65,5 +66,6 @@
   "scripts": {
     "test": "node --test test/",
     "test:real": "node test/real-pi.mjs"
-  }
+  },
+  "icon": "./icon.svg"
 }

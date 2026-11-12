@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="dsh-pi-subagent">
+  <title>dsh-pi-subagent</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#131C2B"/>
+      <stop offset="1" stop-color="#0A111C"/>
+    </linearGradient>
+    <linearGradient id="leaf" gradientUnits="userSpaceOnUse" x1="38" y1="30" x2="56" y2="48">
+      <stop offset="0" stop-color="#3EE8F5"/>
+      <stop offset="1" stop-color="#0B8FE8"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" fill="none" stroke="#26344A" stroke-width="1.5"/>
+
+  <!-- π: one parent, one delegated child -->
+  <path d="M17 23.5 H47" stroke="#F8FAFC" stroke-width="6" stroke-linecap="round"/>
+  <path d="M24 23.5 V45.5" stroke="#DCE5F0" stroke-width="6" stroke-linecap="round"/>
+  <path d="M40 23.5 V32" stroke="#DCE5F0" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- branch to the child node -->
+  <path d="M40 32 C40 39.5 44.5 41 48.5 41" stroke="url(#leaf)" stroke-width="3.6" fill="none" stroke-linecap="round"/>
+  <circle cx="50.5" cy="41" r="6" fill="url(#leaf)"/>
+  <circle cx="50.5" cy="41" r="2.2" fill="#0A111C"/>
+</svg>

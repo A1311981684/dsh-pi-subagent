@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows a
 simple version-per-release list; this project is pre-1.0 and versioned by
 capability, not by compatibility guarantees.
 
+## 0.2.4
+
+- Add the project icon (`icon.svg`), displayed in the plugin manager and on the
+  plugin-market listing.
+
 ## 0.2.3
 
 - First npm publication. `dsh plugin --profile web add dsh-pi-subagent` is now

@@ -1,5 +1,7 @@
 # dsh-pi-subagent
 
+<p align="center"><img src="icon.svg" width="96" height="96" alt="dsh-pi-subagent icon"></p>
+
 [English](README.md) | 中文
 
 把本机的 [Pi](https://pi.dev) 编码 agent 接成 DSH（DeepSeek Harness）里**可查看过程的子智能体**。
