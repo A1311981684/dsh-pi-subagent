@@ -9,9 +9,9 @@
 
 插件自己注册 `pi` 工具（不再需要
 [`@deepseek-ai/dsh-tool-subagent`](https://www.npmjs.com/package/@deepseek-ai/dsh-tool-subagent)），
-每次调用起一个 `pi-dev` 子进程。子进程跑的时候插件收集 Pi 的结构化 JSON 事件；跑完以后把
-这些事件投影成一个真实的 DSH 子会话，并在父会话里追加一条目录记录，于是子会话出现在
-子智能体目录里、能点开、是只读历史。
+每次调用起一个 `pi-dev` 子进程。子会话在进程启动之前就建好，Pi 的 JSON 事件流按行边收边投影：
+思考、回复、工具调用与结果、一次模型调用一个 step，时间戳是真的；父会话的目录行同样在任务
+开始时追加，所以任务还在跑，子会话就已经出现在 DSH 的子智能体目录里，点开是只读历史。
 
 ## 薄壳：只做两件事
 
@@ -28,12 +28,13 @@
 插件自己只做两件事：
 
 1. **跑这次派活**：校验参数，把任务说明写进临时目录，直接起 `pi-dev`（用 `node:child_process`，
-   不依赖子进程服务），按上限收集 stdout/stderr，取消时先 SIGTERM、宽限期后 SIGKILL，
-   最终回答取 Pi 最后一条非空助手消息；
-2. **投影这次运行**：创建一个真实的 DSH 子会话（`sessions.prepare` +
-   `sessionPersistence.create` + `enter`/`announce`），追加子智能体描述符、用户提示、
-   助手回复（文本 + token 用量）和轮次结束，再往父会话追加 `subagent/catalog` 目录记录，
-   最后 flush 两个会话并释放子会话。
+   不依赖子进程服务），stdout 按行增量解析、stderr 只留尾部做诊断，取消时先 SIGTERM、
+   宽限期后 SIGKILL，最终回答取 Pi 最后一条非空助手消息；
+2. **边跑边投影**：先创建一个真实的 DSH 子会话（`sessions.prepare` +
+   `sessionPersistence.create` + `enter`/`announce`），在起进程之前追加开场事件和父会话的
+   `subagent/catalog` 目录行；然后每收到一条 Pi 记录就追加对应事件：一次模型调用一对
+   `step/start`…`step/end`、`assistant/message`（思考/文本/工具调用块）、每次工具执行一对
+   `tool/call` + `tool/result`，最后 `turn/end` 写真实结束原因；收尾 flush 两个会话并释放子会话。
 
 插件不 import 任何 `@deepseek-ai/*` 包，也没有运行时依赖，只用 `node:` 内置模块。
 `tools`、`sessions`、`sessionPersistence` 由 DSH 注入。投影每一步都是尽力而为：服务缺失或
@@ -58,7 +59,8 @@
 | `--model <名字>` | 可选，配了才传。 |
 | `--thinking <档位>` | 可选，配了才传。 |
 | `--tools <工具表>` | 可选，配了才传。 |
-| `--mode <text\|json>` | 投影开启（默认）时传 `--mode json`；投影关闭时不传 `--mode`，封装保持纯文本行为。 |
+| `--mode <text\|json>` | 投影开启（默认）且封装的 `--help` 里提到这个参数时，传 `--mode json`。投影关闭、或帮助里没这个参数时不传，封装保持纯文本行为（见「会话投影」）。 |
+| `--help` | 每次开启投影的派活前先探测一次（stdin 忽略、短超时），据此决定能不能安全地传 `--mode json`。 |
 | `--approve` | 可选，配了才传。 |
 | 其它参数 | 配的 `args`，原样追加在最后。 |
 | **stdout** | 最终回答，DSH 把它当作子智能体的输出交给上层。 |
@@ -113,8 +115,8 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 ```
 
 想加固定规矩、临时状态目录、模型钉死之类的东西，都加在这个封装里。只要上面这份契约不变，
-插件就不用改。不认识 `--mode json`（或者忽略它、只打纯文本）的封装也能用：插件会把整段
-stdout 当回答，投影自动降级（见「会话投影」）。
+插件就不用改。`--help` 里不提 `--mode`（或者忽略它、只打纯文本）的封装也能用：插件按文本
+模式跑，把整段 stdout 当回答，投影自动降级（见「会话投影」）。
 
 ### 自带 `pi-dev` 封装
 
@@ -218,41 +220,57 @@ dsh plugin --profile web add file:/path/to/dsh-subagent-pi
 
 ## 会话投影
 
-每次派活除了返回结果，还会在 DSH 里生成一个真实的子会话（投影第 1 期）。工具会在调用它的
-agent 的会话里创建这个子会话，把 Pi 的这次运行写进去，再给父会话加一条目录记录：
+每次派活除了返回结果，还会在 DSH 里生成一个真实的子会话（投影第 2 期：边跑边投影）。
+**先建子会话、再起进程**，然后来一条 JSON 记录投影一条：
 
 1. `sessions.prepare(childId, { meta })`，meta 带子会话的 `cwd`、`parentSession`、
    `origin: 'subagent'`、`delegationDepth`（父的 + 1），然后
    `sessionPersistence.create(session.header, { inheritedEventCount: 0 })`、写掉发布前的
    seed 尾巴、`enter`、`announce`——和 `dsh-agent-loop` 里一样的顺序；
-2. 子会话的事件：`subagent/descriptor`（第 3 版，`mode: 'one-shot'`，`provider: 'pi'`，
-   带 label）；Pi 每一轮一个 `turn/start`；任务原文作为 `user/message`；每条含 text 的
-   助手回复用一对 `step/start` / `assistant/message` / `step/end` 包住（只留 text 块，
-   `thinking` 和工具调用块这期丢掉）；`turn/end` 写真实的结束原因（`completed` /
-   `aborted` / `error`）；
-3. 父会话的 `subagent/catalog` 事件（第 0 版，`mode: 'one-shot'`，`label`），最后 flush
-   两个会话。
+2. 进程还不存在时先追加开场事件：`turn/start`（DSH 的第 1 个 turn）、`subagent/descriptor`
+   （第 3 版，`mode: 'one-shot'`，`provider: 'pi'`，带 label）、任务原文 `user/message`；
+   紧接着追加父会话的 `subagent/catalog` 目录行（第 0 版），于是 Pi 刚开工目录里就有这一行；
+3. stdout 按行增量解析（半行自己缓冲；单行超过 2 MiB 直接丢弃并 warn），每条记录映射成事件：
+   - `turn_start` 开一个新 step（`step/start`）——Pi 的 turn 对应 DSH 的 **step**，不是 turn；
+   - 助手 `message_end` 在当前 step 里追加 `assistant/message`：`thinking` → `reasoning` 块、
+     text 原样保留、`toolCall` → `tool-call`（参数只序列化一次，作为 DSH 要的原始 JSON 字符串），
+     带该 step 的 `usage`，`stream` 为空；随后每个工具调用追加 `tool/call`，参数串与块里**完全一致**；
+   - `tool_execution_end` 追加 `tool/result`：内容取结果里的 text 块拼接，没有就用序列化的
+     structuredContent，`isError` 透传，走 surface append；
+   - `turn_end` 关掉这个 step——还有没结算的工具调用就先补一条 error 结果，所以 step 不会
+     带着未结算的调用关闭；
+   - `agent_end`/`agent_settled` 只记下的中止标志；真正的 `turn/end`（`completed` / `aborted` /
+     `error`）在子进程退出后统一追加；
+4. 最后 flush 两个会话、detach 子会话、关掉写句柄——不会留一个假的「运行中」会话，DSH 从
+   持久化里把它当只读历史读回来。
 
-能看到什么：子智能体目录里多一行，点开就是任务原文、Pi 的回复和对应的 token 用量
-（`inputTokens`/`outputTokens` 以及 Pi 报的 cache/reasoning 计数）、运行结束状态。日志是
-持久化的，DSH 重启后依然看得见。
+这个顺序不是好看：持久化日志回读时会逐条校验关系。`step/end` 时若还有已登记未结算的
+`tool/call` 会被拒；`turn/end` 时若还有打开的 step 会被拒；`tool/call` 的参数串必须和
+`tool-call` 块里的字符串一模一样；`step` 号必须在打开的 turn 里从 1 连续递增。正常结束、失败、
+取消都走同一个收尾函数，所以日志总是括号配对、并有一个 `turn/end`。
 
-本期**不做**的：
+能看到什么：任务一开始，子智能体目录里就多一行；点开是任务原文、Pi 的思考与回复、工具调用
+（参数与结果）、每个 step 的 token 用量（`inputTokens`/`outputTokens` 以及 Pi 报的
+cache/reasoning 计数）、真实的耗时与时间戳、运行结束状态。日志是持久化的，DSH 重启后依然
+看得见。
 
-- **不投影工具调用**——`tool_execution_start`/`tool_execution_end` 直接忽略，子会话里
-  只有对话，没有工具流水（第 2 期）；
-- **不做运行中状态、不做 Stop 按钮**——事件在运行结束后一次性投影，投影完就把子会话从
-  活跃 store 里摘下，所以它看起来是已结束的历史（第 3 期）。
+本期仍然**不做**的：
+
+- **运行中还没有转圈和 Stop 按钮**——事件会边跑边进日志，目录行也立刻出现，但网页界面还
+  不会给运行中的子会话显示进度、也不能一键停下（第 3 期）。
 
 **降级。** 投影是尽力而为的，永远不会影响派活本身：
 
-- `sessions`/`sessionPersistence` 缺失，或者 `prepare`/`create`/追加被拒：记一条 `warn`，
+- 起进程前先跑一次 `pi-dev --help`（stdin 忽略、短超时）探测 `--mode`；帮助里没提这个参数的
+  封装按**文本模式**跑：投影只有任务原文、一条装下整段 stdout 的助手消息和结束状态，时间戳
+  仍然是真实的。同一项任务不会被跑两遍；
+- `sessions`/`sessionPersistence` 缺失，或者 `prepare`/`create`/开场追加被拒：记一条 `warn`，
   结果照常返回，`childSessionId` 为空；
-- `pi-dev` 产不出 JSON 记录（老封装不认 `--mode json`、封装自己只打纯文本、真跑了文本
-  模式）：整段 stdout 当唯一一条助手消息，投影仍会记录任务原文和结束状态；
-- 封装直接**拒掉** `--mode json`（非 0 退出、stdout 为空、stderr 是参数解析不认 `--mode`
-  的报错）：插件会去掉这个参数重跑一次，任务按文本模式继续，投影按上一条降级。其他失败
-  不会被重试，保持它自己的错误，所以同一项任务不会被跑两遍。
+- 运行中某次追加被拒：记一条 `warn`，后续内容不再投影，但仍会补上结构性收尾
+  （`step/end`、`turn/end`），不至于在日志里留下没收的括号；
+- 要了 JSON 模式、封装却还是打了纯文本：整段 stdout 当唯一一条助手消息，投影仍会记录任务
+  原文和结束状态；
+- 收到找不到对应调用的工具结果、或单行超过 2 MiB：跳过并 `warn`。
 
 ## 行为细节
 
@@ -279,7 +297,7 @@ agent 的会话里创建这个子会话，把 Pi 的这次运行写进去，再�
 git clone <repo> && cd dsh-subagent-pi
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 24 个单元测试，全绿，不联网、不花模型调用
+node --test test/            # 26 个单元测试，全绿，不联网、不花模型调用
 node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型调用
 ```
 
@@ -287,10 +305,11 @@ node test/real-pi.mjs        # 手动跑：一次真 pi-dev，会花一次模型
   `logger`）挂插件，跑真的子进程：`test/fake-pi-dev.mjs` 被复制到临时根目录当 `command`，
   从任务说明里读 `FIXTURE`/`RECORD` 指令，于是每个用例都能控制子进程的 stdout、stderr、
   退出码和时长，同时逐字断言插件拼的 argv、写的 brief、追加的子会话事件。覆盖：工具注册与
-  schema、argv 拼装、参数与 `cwd` 校验、投影事件顺序与 payload（描述符 v3、目录 v0 严格
-  字段、step 括号、usage 映射、`stream: []`）、多轮编号、纯文本与空 stdout 降级、
-  `--mode` 被拒后的重试、error / abort 结束状态、SIGKILL 升级、服务缺失与追加被拒降级、
-  并发隔离、配置校验、HOME 派生的默认值、临时目录清理。
+  schema、argv 拼装、参数与 `cwd` 校验、`--help` 探测（JSON 流 / 文本模式）、流式投影的事件
+  顺序与 payload（描述符 v3、目录 v0 严格字段、step 括号、reasoning/text/tool-call 块、
+  `tool/call` 与 `tool/result` 的配对与参数一致性、usage 映射、`stream: []`）、多轮 step 编号、
+  纯文本与空 stdout 降级、error / abort 结束状态（含取消时为未结算调用补结果）、SIGKILL 升级、
+  服务缺失与追加被拒降级、超长行、并发隔离、配置校验、HOME 派生的默认值、临时目录清理。
 - `test/real-pi.mjs` 是手动端到端：用真 `pi-dev` 跑一条「只回一行字」的短任务，
   传 `--tools read`，说明里明确不许改文件。它没有 DSH 容器，所以顺带验证「投影不可用 →
   只 warn、继续返回」这条降级路径。`NODE_TEST_CONTEXT` 已设置时它直接跳过，

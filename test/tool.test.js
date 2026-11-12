@@ -1,11 +1,13 @@
 /**
- * Unit tests for the `pi` tool and its session projection.
+ * Unit tests for the `pi` tool and its live session projection.
  *
  * Every delegation spawns a real child process — `test/fake-pi-dev.mjs`, copied
  * into the scratch root and executed as the configured `command`. The fixture
  * reads the brief for its `FIXTURE`/`RECORD` directives, so one generic script
- * covers structured runs, plain-text runs, failures, slow runs, and SIGTERM-
- * ignoring runs while every test can inspect the exact argv the plugin built.
+ * covers structured runs, early partial output, plain-text runs, failures, slow
+ * runs, and SIGTERM-ignoring runs while every test can inspect the exact argv
+ * the plugin built. Its own file name decides whether `--help` advertises
+ * `--mode`, which is how the JSON/text probe is exercised.
  *
  * DSH is never loaded: the fake `ctx` below records what the plugin asks of
  * `tools`, `sessions`, and `sessionPersistence`, and the assertions check the
@@ -33,10 +35,13 @@ const { apply, inject, name } = await import('../lib/index.js');
 /** The default command the plugin resolves from the redirected HOME. */
 const DEFAULT_COMMAND = join(homeRoot, '.dsh', 'bin', 'pi-dev');
 
-/** The test-owned wrapper, copied from the repository fixture in `before`. */
+/** The test-owned wrapper that advertises `--mode` in `--help`. */
 let FAKE_PI = '';
 
-/** Scratch root for fixtures, logs, and the copied wrapper. */
+/** A wrapper whose `--help` does not mention `--mode` (text-mode degradation). */
+let FAKE_PI_OLD = '';
+
+/** Scratch root for fixtures, logs, and the copied wrappers. */
 let root = '';
 
 let sequence = 0;
@@ -233,7 +238,36 @@ async function waitForFile(path, timeoutMs = 10_000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-/** Records for one structured run: a thinking-only message, a tool call, and text. */
+/** Wait until `predicate()` is truthy (a streamed event has landed). */
+async function waitFor(predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('timed out waiting for the projection to reach a state');
+}
+
+/** The message_end record for one assistant message. */
+function assistantEnd({ content, usage, provider = 'deepseek', model = 'deepseek-flash', stopReason = 'stop' }) {
+  return {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content,
+      provider,
+      model,
+      ...(usage === undefined ? {} : { usage }),
+      stopReason,
+      timestamp: 1_700_000_000_000,
+    },
+  };
+}
+
+/**
+ * Records for the canonical run: one tool-calling step, then a final text step.
+ * The first assistant message carries both a thinking block and a tool call.
+ */
 function structuredRecords({ text = '改完了：lib/index.js' } = {}) {
   return [
     { type: 'session', version: 3, id: 'pi-session-1', cwd: root },
@@ -241,34 +275,29 @@ function structuredRecords({ text = '改完了：lib/index.js' } = {}) {
     { type: 'turn_start' },
     { type: 'message_start', message: { role: 'user', content: '任务', timestamp: 1_700_000_000_001 } },
     { type: 'message_end', message: { role: 'user', content: '任务', timestamp: 1_700_000_000_001 } },
-    { type: 'message_start', message: { role: 'assistant', content: [], stopReason: 'pending', timestamp: 1_700_000_000_002 } },
-    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '想' } },
-    {
-      type: 'message_end',
-      message: {
-        role: 'assistant',
-        content: [{ type: 'thinking', thinking: '先看看文件' }],
-        provider: 'deepseek',
-        model: 'deepseek-flash',
-        usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12 },
-        stopReason: 'toolUse',
-        timestamp: 1_700_000_000_003,
-      },
-    },
+    assistantEnd({
+      content: [
+        { type: 'thinking', thinking: '先看看文件' },
+        { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'ls' } },
+      ],
+      usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0 },
+      stopReason: 'toolUse',
+    }),
     { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'bash', args: { command: 'ls' } },
-    { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash', result: {}, isError: false },
     {
-      type: 'message_end',
-      message: {
-        role: 'assistant',
-        content: [{ type: 'text', text }],
-        provider: 'deepseek',
-        model: 'deepseek-flash',
-        usage: { input: 20, output: 5, cacheRead: 3, cacheWrite: 4, reasoning: 1, totalTokens: 25 },
-        stopReason: 'stop',
-        timestamp: 1_700_000_000_004,
-      },
+      type: 'tool_execution_end',
+      toolCallId: 'call-1',
+      toolName: 'bash',
+      result: { content: [{ type: 'text', text: 'lib/index.js' }], structuredContent: { entries: ['lib/index.js'] } },
+      isError: false,
+      durationMs: 12,
     },
+    { type: 'turn_end', message: {}, toolResults: [] },
+    { type: 'turn_start' },
+    assistantEnd({
+      content: [{ type: 'text', text }],
+      usage: { input: 20, output: 5, cacheRead: 3, cacheWrite: 4, reasoning: 1 },
+    }),
     { type: 'turn_end', message: {}, toolResults: [] },
     { type: 'agent_end', messages: [], willRetry: false },
     { type: 'agent_settled', aborted: false },
@@ -278,9 +307,12 @@ function structuredRecords({ text = '改完了：lib/index.js' } = {}) {
 before(async () => {
   root = await mkdtemp(join(tmpdir(), 'dsh-subagent-pi-test-'));
   FAKE_PI = join(root, 'fake-pi-dev.mjs');
+  FAKE_PI_OLD = join(root, 'fake-pi-dev-old.mjs');
   const fixture = await readFile(new URL('./fake-pi-dev.mjs', import.meta.url), 'utf8');
   await writeFile(FAKE_PI, fixture, 'utf8');
+  await writeFile(FAKE_PI_OLD, fixture, 'utf8');
   await chmod(FAKE_PI, 0o755);
+  await chmod(FAKE_PI_OLD, 0o755);
 });
 
 after(async () => {
@@ -300,6 +332,7 @@ test('工具注册：名字、面向模型的描述、参数与输出声明', ()
   assert.equal(definition.name, 'pi');
   assert.match(definition.description, /Pi coding agent/);
   assert.match(definition.description, /child session/);
+  assert.match(definition.description, /tool calls/);
   assert.deepEqual(Object.keys(definition.parameters.properties), ['prompt', 'cwd', 'label']);
   assert.deepEqual(definition.parameters.required, ['prompt']);
   assert.equal(definition.parameters.properties.prompt.type, 'string');
@@ -310,7 +343,7 @@ test('工具注册：名字、面向模型的描述、参数与输出声明', ()
   assert.equal(typeof definition.execute, 'function');
 });
 
-test('默认投影开启：argv 带 --mode json，brief / cwd / log 齐全', async () => {
+test('探测：--help 广告 --mode → 走 JSON 流，argv 带 --mode json', async () => {
   const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
   const recorded = recordPath();
   const parent = fakeParent();
@@ -329,9 +362,36 @@ test('默认投影开启：argv 带 --mode json，brief / cwd / log 齐全', asy
   assert.match(value.logPath, /\d{8}-\d{6}-[0-9a-f]{8}\.log$/);
   assert.equal(value.stopReason, 'completed');
   assert.equal(value.output, '改完了：lib/index.js');
+  assert.deepEqual(mounted.warned, []);
 });
 
-test('projection=false：不传 --mode、不碰 sessions，结果照常返回', async () => {
+test('探测：--help 不提 --mode → 文本模式，不重试、不带 --mode', async () => {
+  const fixturePath = await writeFixture({ stdout: '改完了\n' });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount({ config: { command: FAKE_PI_OLD } });
+
+  const value = await runTool(mounted, parent, { prompt: briefWith('老封装', fixturePath, recorded) });
+  const record = JSON.parse(await readFile(recorded, 'utf8'));
+
+  assert.equal(record.argv.includes('--mode'), false);
+  assert.equal(value.stopReason, 'completed');
+  assert.equal(value.output, '改完了');
+  assert.match(mounted.warned[0], /does not advertise --mode/);
+  const events = mounted.sessions.prepared[0].session.events;
+  assert.deepEqual(events.map((event) => event.type), [
+    'turn/start',
+    'subagent/descriptor',
+    'user/message',
+    'step/start',
+    'assistant/message',
+    'step/end',
+    'turn/end',
+  ]);
+  assert.deepEqual(events[4].data.message.content, [{ type: 'text', text: '改完了' }]);
+});
+
+test('projection=false：不探测、不传 --mode、不碰 sessions，结果照常返回', async () => {
   const fixturePath = await writeFixture({ stdout: '改完了' });
   const recorded = recordPath();
   const parent = fakeParent();
@@ -378,7 +438,7 @@ test('参数校验：prompt 必填、cwd/label 必须是字符串、缺 exec.age
   );
 });
 
-test('cwd 校验：相对路径 / 不存在的目录都在 spawn 之前失败', async () => {
+test('cwd 校验：相对路径 / 不存在的目录都在建会话和 spawn 之前失败', async () => {
   const mounted = mount();
   const parent = fakeParent();
   await assert.rejects(
@@ -392,7 +452,7 @@ test('cwd 校验：相对路径 / 不存在的目录都在 spawn 之前失败', 
   assert.deepEqual(mounted.sessions.prepared, []);
 });
 
-test('完成的运行：prepare meta、事件序列、flush、返回值与模型文本', async () => {
+test('完成的运行：会话先建后跑，事件序列、flush 顺序、返回值与模型文本', async () => {
   const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
   const recorded = recordPath();
   const mounted = mount();
@@ -414,12 +474,18 @@ test('完成的运行：prepare meta、事件序列、flush、返回值与模型
   assert.equal(mounted.persistence.created[0].header, session.header);
   assert.equal(value.childSessionId, id);
 
-  // Event sequence: descriptor inside turn 1, then the prompt, one step-wrapped
-  // reply, and the turn end (the durable log is relationship-checked on read).
+  // Event sequence: the turn opens, the descriptor sits inside it, the prompt
+  // lands, then one step per Pi turn (step 1 carries the tool call and step 2
+  // the final text), and the turn closes.
   assert.deepEqual(session.events.map((event) => event.type), [
-    'subagent/descriptor',
     'turn/start',
+    'subagent/descriptor',
     'user/message',
+    'step/start',
+    'assistant/message',
+    'tool/call',
+    'tool/result',
+    'step/end',
     'step/start',
     'assistant/message',
     'step/end',
@@ -427,7 +493,8 @@ test('完成的运行：prepare meta、事件序列、flush、返回值与模型
   ]);
 
   // Order around the projection: create → persist the pre-publication marker
-  // → enter → announce → append → flush.
+  // → enter → announce → append. The opening events and the parent catalog row
+  // exist before the child process starts; flush/detach/close come last.
   assert.equal(mounted.persistence.appended.length, 1, 'the constructor marker must be persisted first');
   assert.deepEqual(mounted.persistence.appended[0].map((event) => event.type), ['session/end-seed']);
   const position = (entry) => mounted.log.indexOf(entry);
@@ -435,9 +502,10 @@ test('完成的运行：prepare meta、事件序列、flush、返回值与模型
   assert.ok(position('persistence:append') < position('sessions:enter'));
   assert.ok(position('persistence:create') < position('sessions:enter'));
   assert.ok(position('sessions:enter') < position('sessions:announce'));
-  assert.ok(position('sessions:announce') < position('append:child:subagent/descriptor'));
-  assert.ok(position('append:child:turn/end') < position('append:parent:subagent/catalog'));
-  assert.ok(position('append:parent:subagent/catalog') < position(`sessions:flush:${id}`));
+  assert.ok(position('sessions:announce') < position('append:child:turn/start'));
+  assert.ok(position('append:child:user/message') < position('append:parent:subagent/catalog'));
+  assert.ok(position('append:parent:subagent/catalog') < position('append:child:step/start'));
+  assert.ok(position('append:child:turn/end') < position(`sessions:flush:${id}`));
   assert.ok(position(`sessions:flush:${id}`) < position('sessions:flush:parent-1'));
   assert.ok(position('sessions:flush:parent-1') < position('sessions:detach'));
   assert.ok(position('sessions:detach') < position('persistence:close'));
@@ -451,99 +519,121 @@ test('完成的运行：prepare meta、事件序列、flush、返回值与模型
   }]);
 });
 
-test('payload：descriptor v3、目录 v0 严格字段、user/message、assistant/message 的 usage 与 stream', async () => {
+test('完整工具调用流：turn/start、descriptor、user/message、step、assistant、tool/call、tool/result、turn/end', async () => {
   const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
   const recorded = recordPath();
   const parent = fakeParent();
   const mounted = mount();
-  const prompt = briefWith('修一个 bug', fixturePath, recorded);
 
-  const value = await runTool(mounted, parent, { prompt });
+  const value = await runTool(mounted, parent, { prompt: briefWith('修一个 bug', fixturePath, recorded) });
   const session = mounted.sessions.prepared[0].session;
-  const [descriptor, turnStart, userEvent, stepStart, assistantEvent, stepEnd, turnEnd] = session.events;
+  const events = session.events;
+  const types = events.map((event) => event.type);
 
-  // subagent/descriptor: exactly the v3 one-shot keys.
-  assert.deepEqual(Object.keys(descriptor.data).sort(), ['label', 'mode', 'provider', 'version']);
-  assert.deepEqual(descriptor.data, { version: 3, mode: 'one-shot', provider: 'pi', label: '修一个 bug' });
-  assert.equal(descriptor.opts, undefined, 'log-only events carry no surfaceOp');
+  // Opening order on the surface.
+  assert.equal(types[0], 'turn/start');
+  assert.equal(types[1], 'subagent/descriptor');
+  assert.equal(types[2], 'user/message');
+  assert.deepEqual(events[0].data, { turn: 1 });
+  assert.deepEqual(events[1].data, { version: 3, mode: 'one-shot', provider: 'pi', label: '修一个 bug' });
+  assert.equal(events[2].data.content[0].type, 'text');
+  assert.match(events[2].data.content[0].text, /^修一个 bug/);
+  assert.deepEqual(events[2].opts, { surfaceOp: 'append' });
 
-  assert.deepEqual(turnStart.data, { turn: 1 });
-  assert.equal(turnStart.opts, undefined);
+  // One step per Pi turn, brackets balanced and every in-step event carrying
+  // its open step's number.
+  const steps = events.filter((event) => event.type === 'step/start');
+  const stepEnds = events.filter((event) => event.type === 'step/end');
+  assert.deepEqual(steps.map((event) => event.data), [{ turn: 1, step: 1 }, { turn: 1, step: 2 }]);
+  assert.deepEqual(stepEnds.map((event) => event.data), [{ turn: 1, step: 1 }, { turn: 1, step: 2 }]);
+  let openStep = null;
+  for (const event of events) {
+    if (event.type === 'step/start') {
+      assert.equal(openStep, null, 'a step must not open inside another step');
+      openStep = event.data.step;
+      continue;
+    }
+    if (event.type === 'step/end') {
+      assert.equal(openStep, event.data.step, 'a step must close the one it opened');
+      openStep = null;
+      continue;
+    }
+    if (openStep !== null && ['assistant/message', 'tool/call', 'tool/result'].includes(event.type)) {
+      assert.equal(event.data.turn, 1);
+      assert.equal(event.data.step, openStep);
+    }
+  }
+  assert.equal(openStep, null, 'every step must be closed');
 
-  // Each assistant message sits in its own step: the durable log rejects an
-  // assistant/message outside an open turn and step.
-  assert.deepEqual(stepStart.data, { turn: 1, step: 1 });
-  assert.deepEqual(stepEnd.data, { turn: 1, step: 1 });
-  assert.equal(stepStart.opts, undefined);
-  assert.equal(stepEnd.opts, undefined);
+  // Assistant message 1: reasoning + tool-call, the tool-call arguments being
+  // the raw JSON string DSH stores.
+  const assistants = events.filter((event) => event.type === 'assistant/message');
+  assert.equal(assistants.length, 2);
+  assert.deepEqual(assistants[0].data.message.content, [
+    { type: 'reasoning', text: '先看看文件' },
+    { type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
+  ]);
+  assert.deepEqual(assistants[0].data.message.source, { kind: 'model', provider: 'deepseek', model: 'deepseek-flash' });
+  assert.equal(assistants[0].data.turn, 1);
+  assert.equal(assistants[0].data.step, 1);
+  assert.deepEqual(assistants[0].opts, { surfaceOp: 'append' });
+  assert.deepEqual(assistants[1].data.message.content, [{ type: 'text', text: '改完了：lib/index.js' }]);
+  assert.equal(assistants[1].data.step, 2);
 
-  // user/message: the task text itself, appended to the surface.
-  assert.deepEqual(userEvent.data, {
-    id: userEvent.data.id,
-    role: 'user',
-    content: [{ type: 'text', text: prompt }],
-    source: { kind: 'user' },
+  // The advertised call is answered: exact arguments, same call id, the tool
+  // result on the surface.
+  const call = events.find((event) => event.type === 'tool/call');
+  assert.deepEqual(call.data, {
+    turn: 1,
+    step: 1,
+    callId: 'call-1',
+    name: 'bash',
+    arguments: '{"command":"ls"}',
   });
-  assert.equal(typeof userEvent.data.id, 'string');
-  assert.ok(userEvent.data.id.length > 0);
-  assert.deepEqual(userEvent.opts, { surfaceOp: 'append' });
+  assert.equal(call.opts, undefined);
+  const block = assistants[0].data.message.content.find((item) => item.type === 'tool-call');
+  assert.equal(call.data.arguments, block.arguments);
 
-  // assistant/message: text only, Pi's route, mapped usage, empty stream.
-  assert.deepEqual(Object.keys(assistantEvent.data).sort(), ['message', 'step', 'stream', 'turn', 'usage']);
-  assert.equal(assistantEvent.data.turn, 1);
-  assert.equal(assistantEvent.data.step, 1);
-  assert.deepEqual(assistantEvent.data.stream, []);
-  assert.deepEqual(assistantEvent.data.usage, {
-    inputTokens: 20,
-    outputTokens: 5,
-    cacheReadTokens: 3,
-    cacheWriteTokens: 4,
-    reasoningTokens: 1,
+  const result = events.find((event) => event.type === 'tool/result');
+  assert.deepEqual(result.data, {
+    turn: 1,
+    step: 1,
+    message: {
+      id: result.data.message.id,
+      role: 'tool',
+      content: [{ type: 'text', text: 'lib/index.js' }],
+      source: { kind: 'tool', callId: 'call-1' },
+      toolCallId: 'call-1',
+    },
   });
-  assert.deepEqual(assistantEvent.data.message, {
-    id: assistantEvent.data.message.id,
-    role: 'assistant',
-    content: [{ type: 'text', text: '改完了：lib/index.js' }],
-    source: { kind: 'model', provider: 'deepseek', model: 'deepseek-flash' },
-  });
-  assert.deepEqual(assistantEvent.opts, { surfaceOp: 'append' });
+  assert.equal(result.data.message.isError, undefined);
+  assert.deepEqual(result.opts, { surfaceOp: 'append' });
 
-  assert.deepEqual(turnEnd.data, { turn: 1, reason: { kind: 'completed' } });
-  assert.equal(turnEnd.opts, undefined);
+  // Every advertised call has exactly one result and is resolved before its
+  // step closes (the durable log rejects an unresolved call).
+  const advertised = assistants.flatMap((event) => event.data.message.content.filter((item) => item.type === 'tool-call'));
+  const resolved = events.filter((event) => event.type === 'tool/result').map((event) => event.data.message.toolCallId);
+  assert.deepEqual(advertised.map((item) => item.id), resolved);
+  const resultIndex = types.indexOf('tool/result');
+  assert.ok(types.indexOf('tool/call') < resultIndex);
+  assert.ok(resultIndex < types.lastIndexOf('step/end'));
 
-  // Parent catalog v0: the strict key set the runtime schema accepts.
-  assert.equal(parent.events.length, 1);
-  const catalog = parent.events[0];
-  assert.equal(catalog.type, 'subagent/catalog');
-  assert.deepEqual(Object.keys(catalog.data).sort(), ['childCreatedAt', 'childId', 'label', 'mode', 'version']);
-  assert.deepEqual(catalog.data, {
-    version: 0,
-    childId: value.childSessionId,
-    childCreatedAt: session.header.createdAt,
-    mode: 'one-shot',
-    label: '修一个 bug',
-  });
-  assert.equal(catalog.opts, undefined);
+  assert.deepEqual(events[events.length - 1].data, { turn: 1, reason: { kind: 'completed' } });
+  assert.equal(value.output, '改完了：lib/index.js');
 });
 
-test('多轮与步序：turn 按 turn_start 计数，step 每轮从 1 递增，thinking/toolCall 丢弃', async () => {
+test('多轮：两个 Pi turn → 两个 step，编号 1、2，只有一个 DSH turn', async () => {
   const fixturePath = await writeFixture({
     stdout: ndjson([
       { type: 'turn_start' },
-      {
-        type: 'message_end',
-        message: { role: 'assistant', content: [{ type: 'text', text: '第一步' }], provider: 'p', model: 'm', usage: { input: 1, output: 1 } },
-      },
-      {
-        type: 'message_end',
-        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '内部推理' }, { type: 'text', text: '第二步' }], provider: 'p', model: 'm' },
-      },
+      assistantEnd({ content: [{ type: 'text', text: '第一步' }], usage: { input: 1, output: 1 } }),
       { type: 'turn_end' },
       { type: 'turn_start' },
-      {
-        type: 'message_end',
-        message: { role: 'assistant', content: [{ type: 'text', text: '第三轮' }], provider: 'p', model: 'm' },
-      },
+      assistantEnd({
+        content: [{ type: 'thinking', thinking: '内部推理' }, { type: 'text', text: '第二步' }],
+        provider: 'p',
+        model: 'm',
+      }),
       { type: 'turn_end' },
       { type: 'agent_settled', aborted: false },
     ]),
@@ -554,43 +644,93 @@ test('多轮与步序：turn 按 turn_start 计数，step 每轮从 1 递增，t
 
   const value = await runTool(mounted, parent, { prompt: briefWith('多轮', fixturePath, recorded) });
   const session = mounted.sessions.prepared[0].session;
-  const assistants = session.events.filter((event) => event.type === 'assistant/message');
 
-  assert.deepEqual(assistants.map((event) => [event.data.turn, event.data.step, event.data.message.content[0].text]), [
-    [1, 1, '第一步'],
-    [1, 2, '第二步'],
-    [2, 1, '第三轮'],
-  ]);
   assert.deepEqual(
-    session.events.map((event) => event.type),
-    [
-      'subagent/descriptor',
-      'turn/start', 'user/message',
-      'step/start', 'assistant/message', 'step/end',
-      'step/start', 'assistant/message', 'step/end',
-      'turn/end',
-      'turn/start',
-      'step/start', 'assistant/message', 'step/end',
-      'turn/end',
-    ],
+    session.events.filter((event) => event.type === 'turn/start').map((event) => event.data),
+    [{ turn: 1 }],
+    'Pi turns are DSH steps, so the log has one DSH turn',
   );
   assert.deepEqual(
     session.events.filter((event) => event.type === 'step/start').map((event) => event.data),
-    [{ turn: 1, step: 1 }, { turn: 1, step: 2 }, { turn: 2, step: 1 }],
+    [{ turn: 1, step: 1 }, { turn: 1, step: 2 }],
   );
-  assert.deepEqual(
-    session.events.filter((event) => event.type === 'turn/start').map((event) => event.data),
-    [{ turn: 1 }, { turn: 2 }],
-  );
-  assert.deepEqual(
-    session.events.filter((event) => event.type === 'turn/end').map((event) => event.data),
-    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'completed' } }],
-  );
-  assert.equal(session.events.filter((event) => event.type === 'user/message').length, 1, '任务只投影一次');
-  const usageOfFirst = assistants[0].data.usage;
-  assert.deepEqual(usageOfFirst, { inputTokens: 1, outputTokens: 1 });
+  const assistants = session.events.filter((event) => event.type === 'assistant/message');
+  assert.deepEqual(assistants.map((event) => [event.data.step, event.data.message.content]), [
+    [1, [{ type: 'text', text: '第一步' }]],
+    [2, [{ type: 'reasoning', text: '内部推理' }, { type: 'text', text: '第二步' }]],
+  ]);
+  assert.deepEqual(assistants[0].data.usage, { inputTokens: 1, outputTokens: 1 });
   assert.equal(assistants[1].data.usage, undefined, '没有 usage 的那条不带 usage 字段');
-  assert.equal(value.output, '第三轮', '最终回答取最后一条非空文本');
+  assert.deepEqual(session.events[0].data, { turn: 1 });
+  assert.deepEqual(session.events[session.events.length - 1].data, { turn: 1, reason: { kind: 'completed' } });
+  assert.equal(session.events.filter((event) => event.type === 'user/message').length, 1, '任务只投影一次');
+  assert.equal(value.output, '第二步', '最终回答取最后一条非空文本');
+});
+
+test('参数与结果映射：thinking→reasoning、toolCall→tool-call、usage、错误结果 isError', async () => {
+  const fixturePath = await writeFixture({
+    stdout: ndjson([
+      { type: 'turn_start' },
+      assistantEnd({
+        content: [
+          { type: 'thinking', thinking: '想一下' },
+          { type: 'text', text: '调用工具' },
+          { type: 'toolCall', id: 'tc-9', name: 'read', arguments: { path: 'a.txt', lines: 3 } },
+        ],
+        usage: { input: 7, output: 4, cacheRead: 2, cacheWrite: 1, reasoning: 3 },
+        stopReason: 'toolUse',
+      }),
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'tc-9',
+        toolName: 'read',
+        result: { content: [], structuredContent: { error: 'boom' } },
+        isError: true,
+        durationMs: 4,
+      },
+      { type: 'turn_end' },
+      { type: 'turn_start' },
+      assistantEnd({ content: [{ type: 'text', text: '失败但继续' }] }),
+      { type: 'turn_end' },
+      { type: 'agent_settled', aborted: false },
+    ]),
+  });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount();
+
+  const value = await runTool(mounted, parent, { prompt: briefWith('映射', fixturePath, recorded) });
+  const session = mounted.sessions.prepared[0].session;
+  const assistant = session.events.find((event) => event.type === 'assistant/message');
+
+  assert.deepEqual(assistant.data.message.content, [
+    { type: 'reasoning', text: '想一下' },
+    { type: 'text', text: '调用工具' },
+    { type: 'tool-call', id: 'tc-9', name: 'read', arguments: '{"path":"a.txt","lines":3}' },
+  ]);
+  assert.deepEqual(assistant.data.usage, {
+    inputTokens: 7,
+    outputTokens: 4,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 1,
+    reasoningTokens: 3,
+  });
+  assert.deepEqual(assistant.data.stream, []);
+
+  const call = session.events.find((event) => event.type === 'tool/call');
+  assert.equal(call.data.arguments, '{"path":"a.txt","lines":3}');
+
+  const result = session.events.find((event) => event.type === 'tool/result');
+  assert.equal(result.data.message.isError, true);
+  assert.deepEqual(result.data.message.content, [{ type: 'text', text: '{"error":"boom"}' }]);
+  assert.equal(result.data.message.toolCallId, 'tc-9');
+  assert.deepEqual(result.data.message.source, { kind: 'tool', callId: 'tc-9' });
+
+  // The step still closed and the run completed normally.
+  const types = session.events.map((event) => event.type);
+  assert.ok(types.indexOf('tool/result') < types.indexOf('step/end'));
+  assert.equal(value.stopReason, 'completed');
+  assert.equal(value.output, '失败但继续');
 });
 
 test('降级：stdout 不是 NDJSON → 全部当最终文本，只有一条助手消息', async () => {
@@ -606,8 +746,8 @@ test('降级：stdout 不是 NDJSON → 全部当最终文本，只有一条助�
   assert.equal(value.output, '改完了\n加了一行注释');
   assert.equal(value.stopReason, 'completed');
   assert.deepEqual(session.events.map((event) => event.type), [
-    'subagent/descriptor',
     'turn/start',
+    'subagent/descriptor',
     'user/message',
     'step/start',
     'assistant/message',
@@ -631,8 +771,8 @@ test('降级：stdout 为空 → 没有助手消息，提示与结束状态照�
 
   assert.equal(value.output, '');
   assert.deepEqual(session.events.map((event) => event.type), [
-    'subagent/descriptor',
     'turn/start',
+    'subagent/descriptor',
     'user/message',
     'turn/end',
   ]);
@@ -693,8 +833,15 @@ test('spawn 失败：command 不存在 → stopReason error，不抛出', async 
   assert.equal(turnEnd.data.reason.kind, 'error');
 });
 
-test('取消：signal abort 终止子进程，turn/end 是 aborted', async () => {
-  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()), delayMs: 5_000 });
+test('取消：运行中 abort → 未结算调用补 result、step 关闭、turn/end 是 aborted', async () => {
+  const early = ndjson([
+    { type: 'turn_start' },
+    assistantEnd({
+      content: [{ type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'sleep 30' } }],
+      stopReason: 'toolUse',
+    }),
+  ]);
+  const fixturePath = await writeFixture({ stdoutEarly: early, delayMs: 30_000 });
   const recorded = recordPath();
   const parent = fakeParent();
   const mounted = mount();
@@ -704,11 +851,30 @@ test('取消：signal abort 终止子进程，turn/end 是 aborted', async () =>
     signal: controller.signal,
   });
   await waitForFile(recorded);
+  const session = mounted.sessions.prepared[0].session;
+  await waitFor(() => session.events.some((event) => event.type === 'tool/call'));
   controller.abort();
   const value = await running;
 
   assert.equal(value.stopReason, 'aborted');
-  const session = mounted.sessions.prepared[0].session;
+  const types = session.events.map((event) => event.type);
+  // The advertised call could not finish: a synthetic error result closes it
+  // before the step, then the turn ends as aborted.
+  assert.deepEqual(types, [
+    'turn/start',
+    'subagent/descriptor',
+    'user/message',
+    'step/start',
+    'assistant/message',
+    'tool/call',
+    'tool/result',
+    'step/end',
+    'turn/end',
+  ]);
+  const result = session.events.find((event) => event.type === 'tool/result');
+  assert.equal(result.data.message.toolCallId, 'call-1');
+  assert.equal(result.data.message.isError, true);
+  assert.match(result.data.message.content[0].text, /did not return a result/);
   const turnEnd = session.events.find((event) => event.type === 'turn/end');
   assert.deepEqual(turnEnd.data, { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } });
 });
@@ -733,34 +899,7 @@ test('取消升级：忽略 SIGTERM 的子进程在 graceMs 后被 SIGKILL', asy
   assert.ok(elapsed < 5_000, `SIGKILL escalation should end the run quickly, took ${elapsed}ms`);
 });
 
-test('降级：老封装不认 --mode → 自动退回文本模式，派活照常，投影降级为文本', async () => {
-  const fixturePath = await writeFixture({ stdout: '改完了\n', rejectMode: true });
-  const recorded = recordPath();
-  const parent = fakeParent();
-  const mounted = mount();
-
-  const value = await runTool(mounted, parent, { prompt: briefWith('老封装', fixturePath, recorded) });
-  const record = JSON.parse(await readFile(recorded, 'utf8'));
-
-  assert.equal(value.stopReason, 'completed');
-  assert.equal(value.output, '改完了');
-  assert.equal(record.argv.includes('--mode'), false, '第二次调用不带 --mode');
-  assert.match(mounted.warned[0], /rejected --mode; retrying in text mode/);
-
-  const session = mounted.sessions.prepared[0].session;
-  assert.deepEqual(session.events.map((event) => event.type), [
-    'subagent/descriptor',
-    'turn/start',
-    'user/message',
-    'step/start',
-    'assistant/message',
-    'step/end',
-    'turn/end',
-  ]);
-  assert.deepEqual(session.events[4].data.message.content, [{ type: 'text', text: '改完了' }]);
-});
-
-test('降级：sessions.prepare 抛错 → 派活结果照常返回，只 warn', async () => {
+test('降级：sessions.prepare 抛错 → 派活结果照常返回，只 warn 一次', async () => {
   const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
   const recorded = recordPath();
   const parent = fakeParent();
@@ -788,8 +927,15 @@ test('降级：sessionPersistence 缺失 → 结果照常，不建子会话', as
   assert.match(mounted.warned[0], /sessionPersistence service is unavailable/);
 });
 
-test('降级：append 被拒 → 子会话被释放，父会话没有目录行，结果照常', async () => {
-  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+test('降级：运行中 append 被拒 → 只 warn，结构仍收尾，结果照常', async () => {
+  const fixturePath = await writeFixture({
+    stdout: ndjson([
+      { type: 'turn_start' },
+      assistantEnd({ content: [{ type: 'text', text: '改完了' }] }),
+      { type: 'turn_end' },
+      { type: 'agent_settled', aborted: false },
+    ]),
+  });
   const recorded = recordPath();
   const parent = fakeParent();
   const mounted = mount({
@@ -797,12 +943,40 @@ test('降级：append 被拒 → 子会话被释放，父会话没有目录行�
   });
 
   const value = await runTool(mounted, parent, { prompt: briefWith('任务', fixturePath, recorded) });
-  assert.equal(value.output, '改完了：lib/index.js');
-  assert.equal(value.childSessionId, '');
+  const session = mounted.sessions.prepared[0].session;
+
+  assert.equal(value.output, '改完了');
+  assert.equal(value.stopReason, 'completed');
+  assert.equal(value.childSessionId, session.id);
   assert.match(mounted.warned[0], /surface append rejected/);
-  assert.equal(parent.events.length, 0, 'a failed projection leaves no dangling catalog row');
+  // Content after the rejected append is skipped, but the step and turn still
+  // close so the stored log is not left structurally open.
+  assert.deepEqual(session.events.map((event) => event.type), [
+    'turn/start',
+    'subagent/descriptor',
+    'user/message',
+    'step/start',
+    'step/end',
+    'turn/end',
+  ]);
   assert.equal(mounted.sessions.detached.length, 1);
-  assert.equal(mounted.persistence.closed.length, 1);
+  assert.deepEqual(mounted.persistence.closed, [session.id]);
+});
+
+test('超长行：丢弃单行并 warn，后续记录照常投影', async () => {
+  const oversized = `${'x'.repeat(2 * 1024 * 1024 + 16)}\n`;
+  const fixturePath = await writeFixture({
+    stdoutEarly: oversized,
+    stdout: ndjson(structuredRecords()),
+  });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount();
+
+  const value = await runTool(mounted, parent, { prompt: briefWith('超长行', fixturePath, recorded) });
+  assert.equal(value.stopReason, 'completed');
+  assert.equal(value.output, '改完了：lib/index.js');
+  assert.ok(mounted.warned.some((line) => /dropping a \d+-character output line/.test(line)));
 });
 
 test('并发 run：不同 fixture 的结果与子会话互不串', async () => {
@@ -823,14 +997,20 @@ test('并发 run：不同 fixture 的结果与子会话互不串', async () => {
   assert.notEqual(valueA.childSessionId, valueB.childSessionId);
   const sessions = mounted.sessions.prepared.map((entry) => entry.session);
   assert.equal(sessions.length, 2);
-  const texts = sessions.map((session) => session.events.find((event) => event.type === 'assistant/message').data.message.content[0].text);
+  const texts = sessions.map((session) => {
+    const assistants = session.events.filter((event) => event.type === 'assistant/message');
+    return assistants[assistants.length - 1].data.message.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('');
+  });
   assert.deepEqual(texts.sort(), ['run-A', 'run-B']);
-  assert.equal(parent.events.length, 2, 'each run appends its own catalog row');
+  assert.equal(parent.events.filter((event) => event.type === 'subagent/catalog').length, 2, 'each run appends its own catalog row');
 });
 
 test('默认值：command 指向 $HOME/.dsh/bin/pi-dev，logDir 是 $HOME/.dsh/pi-logs', async () => {
-  // The default command does not exist under the redirected HOME, so the spawn
-  // failure names it and the real wrapper is never executed.
+  // The default command does not exist under the redirected HOME, so the probe
+  // and the run both fail by name and the real wrapper is never executed.
   const registered = [];
   const ctx = {
     logger: { warn: () => {} },

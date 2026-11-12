@@ -11,9 +11,11 @@ usage, and how the run ended.
 
 The plugin registers its own `pi` tool (it no longer needs
 [`@deepseek-ai/dsh-tool-subagent`](https://www.npmjs.com/package/@deepseek-ai/dsh-tool-subagent))
-and runs one `pi-dev` child per call. While the child runs it collects Pi's structured
-JSON-mode events; once the run settles it projects them into a child session and appends
-the parent's catalog row, so the child appears in DSH's subagent list and opens as history.
+and runs one `pi-dev` child per call. The child session is created before the process
+starts, and Pi's structured JSON-mode events are then projected line by line as they
+arrive: reasoning, replies, tool calls and their results, one step per model call, with
+real timestamps. The parent's catalog row is appended up front too, so the child appears
+in DSH's subagent list while the task is still running and opens as read-only history.
 
 ## The thin shell
 
@@ -31,13 +33,17 @@ The plugin deliberately owns almost nothing about *how* Pi runs. That stays insi
 The plugin itself only does two things:
 
 1. **run the delegation** — validate the arguments, write the brief to a scratch
-   directory, spawn `pi-dev` (plain `node:child_process`, no seam needed), collect stdout
-   and stderr with a byte cap, escalate SIGTERM → SIGKILL on cancellation, and take the
-   final answer from Pi's last non-empty assistant message;
-2. **project the run** — create a real DSH child session (`sessions.prepare` +
-   `sessionPersistence.create` + `enter`/`announce`), append the subagent descriptor, the
-   user prompt, the assistant replies (text + token usage) and the turn end, append the
-   parent's `subagent/catalog` row, then flush both sessions and release the child.
+   directory, spawn `pi-dev` (plain `node:child_process`, no seam needed), parse its stdout
+   as NDJSON incrementally, keep only the stderr tail for diagnostics, escalate SIGTERM →
+   SIGKILL on cancellation, and take the final answer from Pi's last non-empty assistant
+   message;
+2. **project the run live** — create a real DSH child session (`sessions.prepare` +
+   `sessionPersistence.create` + `enter`/`announce`) and append its opening events plus the
+   parent's `subagent/catalog` row *before* spawning the child, then stream one event per
+   Pi record: `step/start`…`step/end` per model call, `assistant/message` with
+   reasoning/text/tool-call blocks, `tool/call` + `tool/result` for every tool execution,
+   and a `turn/end` with the run's real reason; finally flush both sessions and release
+   the child.
 
 It imports no `@deepseek-ai/*` package and has no runtime dependencies — only `node:`
 built-ins. DSH injects the `tools`, `sessions`, and `sessionPersistence` services. Every
@@ -63,7 +69,8 @@ The plugin knows nothing about Pi's arguments; it only knows this contract:
 | `--model <name>` | Optional, passed only when configured. |
 | `--thinking <level>` | Optional, passed only when configured. |
 | `--tools <list>` | Optional, passed only when configured. |
-| `--mode <text\|json>` | Passed as `--mode json` while session projection is on (the default); no `--mode` is passed when projection is off, so the wrapper keeps its text behaviour. |
+| `--mode <text\|json>` | Passed as `--mode json` while session projection is on (the default) and the wrapper's own `--help` advertises the flag. No `--mode` is passed when projection is off or the help text does not mention it, so the wrapper keeps its text behaviour (see [Session projection](#session-projection)). |
+| `--help` | Probed once per projected run (stdin ignored, short timeout) to decide whether `--mode json` is safe to pass. |
 | `--approve` | Optional, passed only when configured. |
 | anything else | `config.args`, appended last, verbatim. |
 | **stdout** | The final answer. DSH returns it to the parent agent as the subagent output. |
@@ -119,9 +126,9 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 
 Add whatever your own workflow needs on top — rules, a state directory, a model pin. Keep
 the contract above intact and the plugin needs no change. A wrapper that does not
-understand `--mode json` (or ignores it and prints plain text) still works: the plugin
-keeps the whole stdout as the answer and degrades the projection (see
-[Session projection](#session-projection)).
+advertise `--mode` in its `--help` (or ignores the flag and prints plain text) still works:
+the plugin runs it in text mode, keeps the whole stdout as the answer, and degrades the
+projection (see [Session projection](#session-projection)).
 
 ### Bundled `pi-dev` wrapper
 
@@ -234,48 +241,72 @@ the first delegation: `graceMs` and `maxOutputBytes` must be positive finite num
 
 ## Session projection
 
-Every delegation also produces a real DSH child session (phase 1 of the projection work).
-The tool creates it in the calling agent's session, appends Pi's run to it, and adds the
-parent's discovery row:
+Every delegation also produces a real DSH child session (phase 2: live, streamed
+projection). The child is created in the calling agent's session *first*, then Pi is
+started, and each JSON record is projected as it arrives:
 
 1. `sessions.prepare(childId, { meta })` with the child's `cwd`, `parentSession`, `origin:
    'subagent'`, and `delegationDepth` (the parent's depth + 1), then
    `sessionPersistence.create(session.header, { inheritedEventCount: 0 })`, the
    pre-publication suffix, `enter`, and `announce` — the same order `dsh-agent-loop` uses;
-2. the child's events: `subagent/descriptor` (version 3, `mode: 'one-shot'`, `provider:
-   'pi'`, the label), one `turn/start` per Pi turn, the task text as `user/message`, one
-   `step/start`/`assistant/message`/`step/end` bracket per assistant reply that has text
-   (text blocks only; `thinking` and tool-call blocks are dropped), and `turn/end` with the
-   run's real reason (`completed`, `aborted`, or `error`);
-3. the parent's `subagent/catalog` event (version 0, `mode: 'one-shot'`, `label`), then a
-   flush of both sessions.
+2. the child's opening events, still before the process exists: `turn/start` (DSH turn 1),
+   `subagent/descriptor` (version 3, `mode: 'one-shot'`, `provider: 'pi'`, the label), and
+   the task text as `user/message`; the parent's `subagent/catalog` row (version 0) follows
+   immediately, so the child is listed while Pi works;
+3. stdout is parsed line by line (a partial line is buffered; a line over 2 MiB is dropped
+   with a warning) and each record becomes one event:
+   - `turn_start` opens a new step (`step/start`) — one Pi turn is one model call, so it maps
+     to a DSH **step**, not a DSH turn;
+   - an assistant `message_end` appends `assistant/message` inside the current step, with
+     `thinking` mapped to `reasoning` blocks, text kept, `toolCall` mapped to `tool-call`
+     (its arguments serialized once to the raw JSON string DSH stores), the step's `usage`,
+     and an empty `stream`; every advertised `tool-call` is then answered by a `tool/call`
+     carrying the *identical* argument string;
+   - `tool_execution_end` appends `tool/result` with the tool's text (or its serialized
+     structured content), `isError` passed through, on the surface;
+   - `turn_end` closes the step — any call still pending gets an error result first, so a
+     step never closes with an unresolved call;
+   - `agent_end`/`agent_settled` just mark the run's abort flag; the `turn/end` with the real
+     reason (`completed`, `aborted`, or `error`) is appended once the child exits;
+4. both sessions are flushed, the child is detached, and its write handle is released — so
+   nothing synthetic stays "running" and DSH reads the log back as read-only history.
 
-What you can see afterwards: the child row in DSH's subagent list, and when you open it,
-the task text, Pi's replies with their token usage (`inputTokens`/`outputTokens` plus the
-cache/reasoning counters Pi reported), and how the run ended. Because the log is durable,
-this survives a DSH restart.
+The order is not cosmetic: the durable log is relationship-checked when it is restored. A
+`step/end` is rejected while an advertised `tool/call` has no `tool/result`, a `turn/end` is
+rejected while a step is open, `tool/call` arguments must equal the `tool-call` block's
+string exactly, and `step` numbers must run 1, 2, 3… inside the open turn. Normal end,
+failure, and cancellation all funnel through the same finalizer, so the log always has
+matched brackets and a `turn/end`.
 
-What phase 1 deliberately does **not** do:
+What you can see: the child row in DSH's subagent list from the moment the task starts, and
+when you open it, the task text, Pi's reasoning and replies, the tool calls with their
+arguments and results, each step's token usage (`inputTokens`/`outputTokens` plus the
+cache/reasoning counters Pi reported), real timestamps/durations, and how the run ended.
+Because the log is durable, this survives a DSH restart.
 
-- **no tool-call projection** — `tool_execution_start`/`tool_execution_end` are ignored, so
-  the child session shows the conversation, not the tool transcript (phase 2);
-- **no live running state and no Stop button** — the events are projected once the run has
-  settled, and the child is then detached from the live store, so it reads as finished
-  history (phase 3).
+Still **not** in this phase:
+
+- **no live running state and no Stop button in the UI** — events stream into the log and
+  the row appears immediately, but the web UI does not yet show a spinner or offer a stop
+  control for the running child (phase 3).
 
 **Degradation.** The projection is best-effort and never affects the delegation:
 
-- if `sessions`/`sessionPersistence` is missing, or `prepare`/`create`/an append is
-  rejected, the plugin logs one `warn` and returns the result with an empty
+- `--mode` support is detected up front by running `pi-dev --help` once (stdin ignored,
+  short timeout); a wrapper whose help does not mention `--mode` is run in **text mode**:
+  the projection gets the task text, one assistant message holding the whole stdout, and the
+  end state, still with real timestamps. A run is never attempted twice;
+- if `sessions`/`sessionPersistence` is missing, or `prepare`/`create`/the opening appends
+  are rejected, the plugin logs one `warn` and returns the result with an empty
   `childSessionId`;
-- if `pi-dev` cannot produce JSON records (an older wrapper that does not understand
-  `--mode json`, a wrapper that only prints the answer, a plain-text run), the whole stdout
+- if an append is rejected mid-run, the plugin logs one `warn`, stops projecting further
+  content, and still appends the structural closers (`step/end`, `turn/end`) so the stored
+  log is not left with an open bracket;
+- if JSON mode was requested but the wrapper printed plain text anyway, the whole stdout
   becomes the single assistant message and the projection still records the prompt and the
   end state;
-- a wrapper that *rejects* `--mode json` outright (a non-zero exit, no stdout, and an
-  argument-parsing complaint naming `--mode`) is retried once without the flag: the run
-  continues in text mode and the projection degrades as above. Any other failure keeps its
-  own error and is never retried, so a task cannot run twice.
+- a tool result whose call was never advertised is skipped with a `warn`; a line over the
+  2 MiB cap is dropped with a `warn`.
 
 ## Behavior details
 
@@ -306,7 +337,7 @@ What phase 1 deliberately does **not** do:
 git clone <repo> && cd dsh-subagent-pi
 node --check lib/index.js
 bash -n bin/pi-dev
-node --test test/            # 24 unit tests, all green, no network and no model call
+node --test test/            # 26 unit tests, all green, no network and no model call
 node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
 ```
 
@@ -316,11 +347,14 @@ node test/real-pi.mjs        # opt-in: one real pi-dev run, costs a model call
   `FIXTURE`/`RECORD` directives from the brief, so every test controls the child's stdout,
   stderr, exit code, and timing while the plugin's argv, brief, and child-session events are
   asserted exactly. Covered: tool registration and schema, argv building, argument and
-  `cwd` validation, the projection event order and payloads (descriptor v3, catalog v0
-  strict keys, step brackets, usage mapping, `stream: []`), multi-turn numbering,
-  plain-text and empty-stdout degradation, the `--mode` rejection retry, error/abort end
-  states, SIGKILL escalation, missing-service and rejected-append degradation, concurrent
-  runs, config validation, HOME-derived defaults, and scratch-directory cleanup.
+  `cwd` validation, the `--help` capability probe (JSON vs. text mode), the streamed
+  projection event order and payloads (descriptor v3, catalog v0 strict keys, step
+  brackets, reasoning/text/tool-call blocks, `tool/call`/`tool/result` pairing and argument
+  identity, usage mapping, `stream: []`), multi-turn step numbering, plain-text and
+  empty-stdout degradation, error/abort end states (including a pending call resolved on
+  cancel), SIGKILL escalation, missing-service and rejected-append degradation, an
+  oversized line, concurrent runs, config validation, HOME-derived defaults, and
+  scratch-directory cleanup.
 - `test/real-pi.mjs` is the manual end-to-end check: a real `pi-dev` run whose brief asks
   for one line of text with `--tools read` and no file changes. It has no DSH container, so
   it also exercises the "projection unavailable → warn and continue" path. It exits as a

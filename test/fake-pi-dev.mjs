@@ -2,26 +2,42 @@
 /**
  * A stand-in for `pi-dev` used by the unit tests.
  *
- * The plugin writes the delegation brief to a scratch file and passes it as
- * `--brief`; this script reads the brief for its two test directives:
+ * The plugin probes the wrapper with `--help` before every projected run and
+ * only asks for `--mode json` when the help text mentions it. This fixture
+ * decides that from its own file name: a copy whose name contains `old` (or
+ * `no-mode`) prints a usage line without `--mode`, everything else advertises
+ * it. No brief is read on the help path.
  *
- * - `FIXTURE <path>` — JSON with `stdout`, `stderr`, `exitCode`, `delayMs`, and
- *   `ignoreTerm` knobs;
+ * The plugin writes the delegation brief to a scratch file and passes it as
+ * `--brief`; this script reads the brief for its test directives:
+ *
+ * - `FIXTURE <path>` — JSON with `stdout`, `stdoutEarly`, `stderr`, `exitCode`,
+ *   `delayMs`, and `ignoreTerm` knobs;
  * - `RECORD <path>` — where to write `{ argv, cwd, brief }`, so a test can see
  *   exactly how the plugin invoked the wrapper.
+ *
+ * `stdoutEarly` is written *before* the delay, so a cancellation test can leave
+ * the projection mid-step (an advertised tool call with no result yet).
  *
  * `ignoreTerm` installs a no-op SIGTERM handler *before* the record file is
  * written, so a test that waits for the record knows the child will survive the
  * first signal and can only be stopped by the SIGKILL escalation.
  *
- * `rejectMode` emulates an older wrapper that does not know `--mode`: it exits
- * 2 with an argument-parsing complaint instead of running anything.
- *
  * This is a test fixture, not a package entry point.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
 
 const args = process.argv.slice(2);
+
+if (args.includes('--help') || args.includes('-h')) {
+  const supportsMode = !/old|no-mode/.test(basename(import.meta.filename));
+  process.stdout.write(supportsMode
+    ? 'Usage: pi-dev --brief <file|-> [--mode text|json] [--log <file>]\n'
+    : 'Usage: pi-dev --brief <file|-> [--log <file>]\n');
+  process.exit(0);
+}
+
 const flagValue = (flag) => {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
@@ -42,14 +58,13 @@ const fixture = fixturePath === undefined || fixturePath === ''
   ? {}
   : JSON.parse(readFileSync(fixturePath, 'utf8'));
 
-if (fixture.rejectMode === true && args.includes('--mode')) {
-  process.stderr.write('pi-dev: unknown argument: --mode (see --help)\n');
-  process.exitCode = 2;
-} else if (fixture.ignoreTerm === true) process.on('SIGTERM', () => {});
+if (fixture.ignoreTerm === true) process.on('SIGTERM', () => {});
 
-if (process.exitCode === undefined && recordPath !== undefined && recordPath !== '') {
+if (recordPath !== undefined && recordPath !== '') {
   writeFileSync(recordPath, JSON.stringify({ argv: args, cwd: process.cwd(), brief }));
 }
+
+if (typeof fixture.stdoutEarly === 'string') process.stdout.write(fixture.stdoutEarly);
 
 const finish = () => {
   if (typeof fixture.stdout === 'string') process.stdout.write(fixture.stdout);
@@ -58,7 +73,5 @@ const finish = () => {
 };
 
 const delayMs = typeof fixture.delayMs === 'number' ? fixture.delayMs : 0;
-if (process.exitCode !== undefined) {
-  /* the mode rejection already settled the run */
-} else if (delayMs > 0) setTimeout(finish, delayMs);
+if (delayMs > 0) setTimeout(finish, delayMs);
 else finish();
