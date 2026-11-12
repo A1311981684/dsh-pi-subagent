@@ -191,6 +191,9 @@ mounts the plugin, which registers the `pi` tool and projects child sessions, an
 up as a card under **Plugins → Installed** in the web app.
 
 ```bash
+# from npm
+dsh plugin --profile web add dsh-pi-subagent
+
 # from GitHub
 dsh plugin --profile web add git+https://github.com/A1311981684/dsh-pi-subagent.git
 

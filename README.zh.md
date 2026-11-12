@@ -170,6 +170,9 @@ exec "$PI_BIN" "${args[@]}" "$prompt"
 「插件 → 已安装插件」里也会出现它的卡片。
 
 ```bash
+# 从 npm 装
+dsh plugin --profile web add dsh-pi-subagent
+
 # 从 GitHub 装
 dsh plugin --profile web add git+https://github.com/A1311981684/dsh-pi-subagent.git
 
