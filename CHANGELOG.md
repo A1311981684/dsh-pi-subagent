@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows a
 simple version-per-release list; this project is pre-1.0 and versioned by
 capability, not by compatibility guarantees.
 
+## 0.2.5
+
+- Add `labelPrefix` (default `'pi · '`): every newly projected child session's
+  label is prefixed so Pi rows stand out from Codex/Claude Code rows in DSH's
+  subagent panel. Set it to `''` to disable the prefix. Existing catalog rows
+  and rows written by `pi_recover_legacy` keep their old labels.
+
 ## 0.2.4
 
 - Add the project icon (`icon.svg`), displayed in the plugin manager and on the

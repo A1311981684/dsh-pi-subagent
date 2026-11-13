@@ -390,6 +390,25 @@ test('回填：external 行 + ids 指定的 one-shot 行各建一个可点开的
   assert.ok(position('sessions:detach') < position('persistence:close'));
 });
 
+test('labelPrefix 不影响回填 label：descriptor 与 catalog 保持回填格式', async () => {
+  const mounted = mount({ config: { recoverLegacy: true, labelPrefix: '[Pi] ' } });
+  const parent = fakeParent([{ childId: TEXT_ID, mode: 'external', label: '旧派活甲' }], mounted.log);
+
+  const value = await runRecover(mounted, parent, {});
+  assert.equal(value.recovered, 1);
+
+  const item = value.items[0];
+  const catalog = parent.events.find(
+    (event) => event.type === 'subagent/catalog' && event.data.childId === item.newChildId,
+  );
+  assert.equal(catalog.data.label, `（回填 ${TEXT_ID.slice(0, 8)}）旧派活甲`);
+  const prepared = mounted.sessions.prepared.find((entry) => entry.id === item.newChildId);
+  assert.equal(
+    prepared.session.events.find((event) => event.type === 'subagent/descriptor').data.label,
+    `recovered ${TEXT_ID.slice(0, 8)}`,
+  );
+});
+
 test('幂等：第二次运行跳过已回填的行，不再建会话', async () => {
   const mounted = mount({ config: { recoverLegacy: true } });
   const parent = fakeParent(defaultCatalog(), mounted.log);

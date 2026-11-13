@@ -546,7 +546,7 @@ test('完整工具调用流：turn/start、descriptor、user/message、step、as
   assert.equal(types[1], 'subagent/descriptor');
   assert.equal(types[2], 'user/message');
   assert.deepEqual(events[0].data, { turn: 1 });
-  assert.deepEqual(events[1].data, { version: 3, mode: 'one-shot', provider: 'pi', label: '修一个 bug' });
+  assert.deepEqual(events[1].data, { version: 3, mode: 'one-shot', provider: 'pi', label: 'pi · 修一个 bug' });
   assert.equal(events[2].data.content[0].type, 'text');
   assert.match(events[2].data.content[0].text, /^修一个 bug/);
   assert.deepEqual(events[2].opts, { surfaceOp: 'append' });
@@ -1050,7 +1050,7 @@ test('默认值：command 指向 $HOME/.dsh/bin/pi-dev，logDir 是 $HOME/.dsh/p
   assert.equal(record.argv.includes('--session-id'), true);
 });
 
-test('配置校验：数值项必须正有限、command 非空、projection 必须布尔', () => {
+test('配置校验：数值项必须正有限、command 非空、projection/labelPrefix 必须合法', () => {
   const logDir = join(root, 'logs');
   assert.throws(() => mount({ config: { logDir, graceMs: 0 } }), /graceMs must be a positive finite number/);
   assert.throws(
@@ -1063,6 +1063,82 @@ test('配置校验：数值项必须正有限、command 非空、projection 必�
   assert.throws(() => mount({ config: { logDir, approve: 'yes' } }), /approve must be a boolean/);
   assert.throws(() => mount({ config: { logDir, logMode: 'verbose' } }), /logMode must be "summary" or "full"/);
   assert.throws(() => mount({ config: { logDir, sessionDir: '' } }), /sessionDir must be a non-empty string/);
+  assert.throws(() => mount({ config: { logDir, labelPrefix: 1 } }), /labelPrefix must be a string/);
+  assert.throws(
+    () => mount({ config: { logDir, labelPrefix: 'pi\n· ' } }),
+    /labelPrefix must not contain control characters/,
+  );
+  assert.throws(
+    () => mount({ config: { logDir, labelPrefix: 'pi\u0007· ' } }),
+    /labelPrefix must not contain control characters/,
+  );
+});
+
+test('labelPrefix 默认：descriptor 与父 catalog 的 label 都带 "pi · " 前缀', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount();
+
+  await runTool(mounted, parent, { prompt: briefWith('修一个 bug', fixturePath, recorded) });
+
+  const descriptor = mounted.sessions.prepared[0].session.events
+    .find((event) => event.type === 'subagent/descriptor');
+  assert.equal(descriptor.data.label, 'pi · 修一个 bug');
+  const catalog = parent.events.find((event) => event.type === 'subagent/catalog');
+  assert.equal(catalog.data.label, 'pi · 修一个 bug');
+});
+
+test('labelPrefix 自定义：用配置的前缀替换默认值', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount({ config: { labelPrefix: '[Pi] ' } });
+
+  await runTool(mounted, parent, { prompt: briefWith('自定义前缀', fixturePath, recorded) });
+
+  const catalog = parent.events.find((event) => event.type === 'subagent/catalog');
+  assert.equal(catalog.data.label, '[Pi] 自定义前缀');
+});
+
+test('labelPrefix 空字符串：label 保持解析结果，不加前缀', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount({ config: { labelPrefix: '' } });
+
+  await runTool(mounted, parent, { prompt: briefWith('无前缀', fixturePath, recorded) });
+
+  const catalog = parent.events.find((event) => event.type === 'subagent/catalog');
+  assert.equal(catalog.data.label, '无前缀');
+});
+
+test('labelPrefix 作用于显式 label：显式 label 也加前缀', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount();
+
+  await runTool(mounted, parent, {
+    prompt: briefWith('任务首行', fixturePath, recorded),
+    label: '显式标签',
+  });
+
+  const catalog = parent.events.find((event) => event.type === 'subagent/catalog');
+  assert.equal(catalog.data.label, 'pi · 显式标签');
+});
+
+test('labelPrefix 计入 60 字上限：prompt 首行加前缀后不超 60 字', async () => {
+  const fixturePath = await writeFixture({ stdout: ndjson(structuredRecords()) });
+  const recorded = recordPath();
+  const parent = fakeParent();
+  const mounted = mount();
+
+  await runTool(mounted, parent, { prompt: briefWith('首'.repeat(100), fixturePath, recorded) });
+
+  const catalog = parent.events.find((event) => event.type === 'subagent/catalog');
+  assert.equal(catalog.data.label.length, 60);
+  assert.equal(catalog.data.label, `pi · ${'首'.repeat(55)}`);
 });
 
 test('临时目录清理：brief 目录在 run 结束后不存在', async () => {

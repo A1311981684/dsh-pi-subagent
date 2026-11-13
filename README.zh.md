@@ -232,6 +232,7 @@ dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 | `tools` | — | 填了就传 `--tools`。 |
 | `approve` | `false` | 为 `true` 就传 `--approve`。 |
 | `projection` | `true` | 把每次派活投影成 DSH 子会话。`false` 完全不投影，也不给封装传 `--mode`。 |
+| `labelPrefix` | `pi · ` | 加在每个新子会话 label 前面的前缀，方便在面板里和其他后端的记录区分。设成 `''` 就关掉。只影响之后新建的记录；已有记录和 `pi_recover_legacy` 回填的记录不变。 |
 | `recoverLegacy` | `false` | 注册维护工具 `pi_recover_legacy`，把旧的 `mode: "external"` 派活回填成真实子会话。默认关，见 [旧派活回填（维护工具）](#旧派活回填维护工具)。 |
 | `logMode` | `summary` | `summary`（默认）插件自己写精简日志：任务首行、最终回答、每个工具一行、usage/stopReason/子会话 id。`full` 让封装 tee 完整输出（`--log`），JSON 模式下就是原始事件流，可能几十 MB。 |
 | `logDir` | `$HOME/.dsh/pi-logs` | 日志放这里，文件名是 `<YYYYMMDD-HHmmss>-<id 前 8 位>.log`。 |
@@ -242,7 +243,7 @@ dsh plugin --profile web add file:/path/to/dsh-pi-subagent
 配置在挂载时就检查，配错当场报错，不会拖到第一次派活。规则：`graceMs` 和
 `maxOutputBytes` 必须是正有限数，`command`、`logDir`、`sessionDir` 必须是非空字符串，
 `logMode` 只能是 `"summary"` 或 `"full"`，`args` 必须是字符串数组，
-`approve`/`projection`/`recoverLegacy` 必须是布尔。
+`approve`/`projection`/`recoverLegacy` 必须是布尔，`labelPrefix` 必须是不含控制字符的字符串（可以为空）。
 
 ## 会话投影
 

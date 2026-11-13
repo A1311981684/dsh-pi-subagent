@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-subagent",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Pi (pi-dev) as a DSH subagent: one pi-dev child process per delegation, projected into an inspectable, durable DSH child session",
   "author": "Asta Zhao",
   "license": "MIT",

@@ -254,6 +254,7 @@ All fields are optional; the bundle patch passes none of them.
 | `tools` | — | When set, passed as `--tools`. |
 | `approve` | `false` | When `true`, passes `--approve`. |
 | `projection` | `true` | Project each run into a DSH child session. `false` skips the projection entirely and passes no `--mode` to the wrapper. |
+| `labelPrefix` | `pi · ` | Prefix added to every new child session's label, so Pi rows are recognizable next to rows from other backends. Set to `''` to disable it. It only affects rows created after it is set; existing catalog rows, and rows written by `pi_recover_legacy`, keep their old labels. |
 | `recoverLegacy` | `false` | Register the maintenance tool `pi_recover_legacy`, which backfills legacy `mode: "external"` delegations into real child sessions. Off by default; see [Legacy delegation backfill](#legacy-delegation-backfill-maintenance). |
 | `logMode` | `summary` | `summary` (default) writes a compact log itself: task first line, final answer, one line per tool, usage/stop reason/session. `full` asks the wrapper to tee the whole output (`--log`), which in JSON mode is the raw event stream and can be tens of MB. |
 | `logDir` | `$HOME/.dsh/pi-logs` | Where logs go, named `<YYYYMMDD-HHmmss>-<id 8 chars>.log`. |
@@ -264,8 +265,9 @@ All fields are optional; the bundle patch passes none of them.
 Validation happens at mount time, so a bad value is a load error rather than a surprise on
 the first delegation: `graceMs` and `maxOutputBytes` must be positive finite numbers,
 `command`, `logDir`, and `sessionDir` must be non-empty strings, `logMode` must be
-`"summary"` or `"full"`, `args` must be an array of strings, and `approve`/`projection`/
-`recoverLegacy` must be booleans.
+`"summary"` or `"full"`, `args` must be an array of strings, `approve`/`projection`/
+`recoverLegacy` must be booleans, and `labelPrefix` must be a string without control
+characters (an empty string is allowed).
 
 ## Session projection
 
@@ -369,8 +371,8 @@ cleanup script does not delete them.
   it delegates to the local Pi agent and that a child session is created. Parameters are
   `prompt` (required), `cwd` (optional; defaults to the calling session's working
   directory), `label` (optional; defaults to the first line of `prompt`, at most 60
-  characters), and `session` (optional; the child session id from an earlier call, to
-  continue that delegation).
+  characters including `labelPrefix`), and `session` (optional; the child session id from
+  an earlier call, to continue that delegation).
 - **The tool value** is `{ output, childSessionId, session, logPath, stopReason }` (plus
   `diagnostic` when the run failed). The model sees the final answer, an optional
   diagnostic, a `subagent session: <id>` line, a `to continue this delegation, pass session:
